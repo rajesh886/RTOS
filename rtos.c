@@ -2,7 +2,7 @@
 // J Losh
 
 // Student Name:
-// TO DO: Add your name on this line.  Do not include your ID number in the file.
+// Rajesh Rayamajhi
 
 // Add xx_ prefix to all files in your project
 // xx_rtos.c
@@ -50,12 +50,27 @@
 #include "wait.h"
 
 // REQUIRED: correct these bitbanding references for the off-board LEDs
-#define BLUE_LED     (*((volatile uint32_t *)(0x42000000 + (0x400253FC-0x40000000)*32 + 2*4))) // on-board blue LED
-#define RED_LED      (*((volatile uint32_t *)(0x42000000 + (0x400053FC-0x40000000)*32 + 0*4))) // off-board red LED
-#define GREEN_LED    (*((volatile uint32_t *)(0x42000000 + (0x400053FC-0x40000000)*32 + 0*4))) // off-board green LED
-#define YELLOW_LED   (*((volatile uint32_t *)(0x42000000 + (0x400053FC-0x40000000)*32 + 0*4))) // off-board yellow LED
-#define ORANGE_LED   (*((volatile uint32_t *)(0x42000000 + (0x400053FC-0x40000000)*32 + 0*4))) // off-board orange LED
+#define BLUE_LED         (*((volatile uint32_t *)(0x42000000 + (0x400253FC-0x40000000)*32 + 2*4)))
+#define RED_LED          (*((volatile uint32_t *)(0x42000000 + (0x400243FC-0x40000000)*32 + 1*4)))
+#define ORANGE_LED       (*((volatile uint32_t *)(0x42000000 + (0x400243FC-0x40000000)*32 + 2*4)))
+#define YELLOW_LED       (*((volatile uint32_t *)(0x42000000 + (0x400243FC-0x40000000)*32 + 3*4)))
+#define GREEN_LED        (*((volatile uint32_t *)(0x42000000 + (0x400243FC-0x40000000)*32 + 4*4)))
 
+//Port E masks
+#define BLUE_LED_MASK 4
+#define RED_LED_MASK 2
+#define ORANGE_LED_MASK 4
+#define YELLOW_LED_MASK 8
+#define GREEN_LED_MASK 16
+
+
+//Port A masks
+#define PUSH_BUTTON_MASK0 4
+#define PUSH_BUTTON_MASK1 8
+#define PUSH_BUTTON_MASK2 16
+#define PUSH_BUTTON_MASK3 32
+#define PUSH_BUTTON_MASK4 64
+#define PUSH_BUTTON_MASK5 128
 //-----------------------------------------------------------------------------
 // RTOS Defines and Kernel Variables
 //-----------------------------------------------------------------------------
@@ -280,12 +295,47 @@ void usageFaultIsr()
 //           6 pushbuttons, and uart
 void initHw()
 {
+    // Configure HW to work with 16 MHz XTAL, PLL enabled, sysdivider of 5, creating system clock of 40 MHz
+    SYSCTL_RCC_R = SYSCTL_RCC_XTAL_16MHZ | SYSCTL_RCC_OSCSRC_MAIN | SYSCTL_RCC_USESYSDIV | (4 << SYSCTL_RCC_SYSDIV_S);
+
+    // Set GPIO ports to use APB (not needed since default configuration -- for clarity)
+    SYSCTL_GPIOHBCTL_R = 0;
+
+    // Enable clocks
+    SYSCTL_RCGCGPIO_R |= SYSCTL_RCGCGPIO_R4;
+    SYSCTL_RCGCGPIO_R |= SYSCTL_RCGCGPIO_R5;
+    SYSCTL_RCGCGPIO_R |= SYSCTL_RCGCGPIO_R0;
+    _delay_cycles(3);
+
+    GPIO_PORTF_DIR_R |= BLUE_LED_MASK;
+    GPIO_PORTE_DIR_R |= RED_LED_MASK | ORANGE_LED_MASK | YELLOW_LED_MASK | GREEN_LED_MASK ;
+    GPIO_PORTA_DIR_R &= ~PUSH_BUTTON_MASK0 | ~PUSH_BUTTON_MASK1 | ~PUSH_BUTTON_MASK2 | ~PUSH_BUTTON_MASK3 | ~PUSH_BUTTON_MASK4 | ~PUSH_BUTTON_MASK5;
+
+    GPIO_PORTF_DR2R_R |= BLUE_LED_MASK;
+    GPIO_PORTE_DR2R_R |= RED_LED_MASK | ORANGE_LED_MASK | YELLOW_LED_MASK | GREEN_LED_MASK;
+
+    GPIO_PORTF_DEN_R |= BLUE_LED_MASK;
+    GPIO_PORTE_DEN_R |= RED_LED_MASK | ORANGE_LED_MASK | YELLOW_LED_MASK | GREEN_LED_MASK;
+    GPIO_PORTA_DEN_R |= PUSH_BUTTON_MASK0 | PUSH_BUTTON_MASK1 | PUSH_BUTTON_MASK2 | PUSH_BUTTON_MASK3 | PUSH_BUTTON_MASK4 | PUSH_BUTTON_MASK5 ;
+
+    GPIO_PORTA_PUR_R |= PUSH_BUTTON_MASK0 | PUSH_BUTTON_MASK1 | PUSH_BUTTON_MASK2 | PUSH_BUTTON_MASK3 | PUSH_BUTTON_MASK4 | PUSH_BUTTON_MASK5;
+
+    initUart0();
+    setUart0BaudRate(115200, 40e6);
 }
 
 // REQUIRED: add code to return a value from 0-63 indicating which of 6 PBs are pressed
 uint8_t readPbs()
 {
-    return 0;
+    uint8_t sum = 0;
+    if(!PUSH_BUTTON0) sum+=1;
+    if(!PUSH_BUTTON1) sum+=2;
+    if(!PUSH_BUTTON2) sum+=4;
+    if(!PUSH_BUTTON3) sum+=8;
+    if(!PUSH_BUTTON4) sum+=16;
+    if(!PUSH_BUTTON5) sum+=32;
+
+    return sum;
 }
 
 //-----------------------------------------------------------------------------
