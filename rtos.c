@@ -224,9 +224,24 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
             while (tcb[i].state != STATE_INVALID) {i++;}
             tcb[i].state = STATE_UNRUN;
             tcb[i].pid = fn;
-            tcb[i].sp = 0;
+            tcb[i].spInit = mystack+stackBytes;
+            tcb[i].sp = mystack;
+            mystack = mystack+stackBytes;
             tcb[i].priority = priority;
             tcb[i].currentPriority = priority;
+            copy(name,tcb[i].name);
+            //tcb[i].name = name;
+            char str[100];
+            putsUart0(tcb[i].name);
+            putsUart0("\r\n");
+            sprintf(str,"%p\r\n", tcb[i].pid);
+            putsUart0(str);
+            sprintf(str,"%d\r\n", tcb[i].priority);
+            putsUart0(str);
+            sprintf(str,"%p\r\n", tcb[i].sp);
+            putsUart0(str);
+            sprintf(str,"%d\r\n", stackBytes);
+            putsUart0(str);
             // increment task count
             taskCount++;
             ok = true;
@@ -389,7 +404,13 @@ uint8_t readPbs()
 // YOUR UNIQUE CODE
 // REQUIRED: add any custom code in this space
 //-----------------------------------------------------------------------------
-
+void copy(char s1[], char s2[]){
+    uint8_t i=0;
+    for (i = 0; s1[i] != '\0'; ++i) {
+            s2[i] = s1[i];
+        }
+    s2[i] = '\0';
+}
 // ------------------------------------------------------------------------------
 //  Task functions
 // ------------------------------------------------------------------------------
