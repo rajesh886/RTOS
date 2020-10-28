@@ -10,6 +10,9 @@ rtos.obj: /Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS/incl
 rtos.obj: /Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS/include/machine/_stdint.h
 rtos.obj: /Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS/include/sys/_stdint.h
 rtos.obj: /Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS/include/stdbool.h
+rtos.obj: ../tm4c123gh6pm.h
+rtos.obj: ../uart0.h
+rtos.obj: ../wait.h
 
 ../rtos.c: 
 /Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS/include/stdint.h: 
@@ -21,3 +24,6 @@ rtos.obj: /Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS/incl
 /Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS/include/machine/_stdint.h: 
 /Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS/include/sys/_stdint.h: 
 /Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS/include/stdbool.h: 
+../tm4c123gh6pm.h: 
+../uart0.h: 
+../wait.h: 

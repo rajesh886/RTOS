@@ -56,6 +56,13 @@
 #define YELLOW_LED       (*((volatile uint32_t *)(0x42000000 + (0x400243FC-0x40000000)*32 + 3*4)))
 #define GREEN_LED        (*((volatile uint32_t *)(0x42000000 + (0x400243FC-0x40000000)*32 + 4*4)))
 
+#define PUSH_BUTTON0  (*((volatile uint32_t *)(0x42000000 + (0x400043FC-0x40000000)*32 + 2*4)))
+#define PUSH_BUTTON1  (*((volatile uint32_t *)(0x42000000 + (0x400043FC-0x40000000)*32 + 3*4)))
+#define PUSH_BUTTON2  (*((volatile uint32_t *)(0x42000000 + (0x400043FC-0x40000000)*32 + 4*4)))
+#define PUSH_BUTTON3  (*((volatile uint32_t *)(0x42000000 + (0x400043FC-0x40000000)*32 + 5*4)))
+#define PUSH_BUTTON4  (*((volatile uint32_t *)(0x42000000 + (0x400043FC-0x40000000)*32 + 6*4)))
+#define PUSH_BUTTON5  (*((volatile uint32_t *)(0x42000000 + (0x400043FC-0x40000000)*32 + 7*4)))
+
 //Port E masks
 #define BLUE_LED_MASK 4
 #define RED_LED_MASK 2
@@ -71,6 +78,40 @@
 #define PUSH_BUTTON_MASK3 32
 #define PUSH_BUTTON_MASK4 64
 #define PUSH_BUTTON_MASK5 128
+
+//void waitPbPress0()
+//{
+//    while(PUSH_BUTTON0);
+//}
+//
+//void waitPbPress1()
+//{
+//    while(PUSH_BUTTON1);
+//}
+//
+//void waitPbPress2()
+//{
+//    while(PUSH_BUTTON2);
+//}
+//
+//void waitPbPress3()
+//{
+//    while(PUSH_BUTTON3);
+//}
+//
+//void waitPbPress4()
+//{
+//    while(PUSH_BUTTON4);
+//}
+//
+//void waitPbPress5()
+//{
+//    while(PUSH_BUTTON5);
+//}
+
+uint32_t mystack;
+
+
 //-----------------------------------------------------------------------------
 // RTOS Defines and Kernel Variables
 //-----------------------------------------------------------------------------
@@ -120,6 +161,12 @@ struct _tcb
     char name[16];                 // name of task used in ps command
     void *semaphore;               // pointer to the semaphore that is blocking the thread
 } tcb[MAX_TASKS];
+
+#pragma DATA_SECTION(pVectors, ".htable")
+void (* const pVectors[])(void) =
+{
+    (void (*)(void))((uint32_t)&mystack)
+};
 
 //-----------------------------------------------------------------------------
 // RTOS Kernel Functions
@@ -520,6 +567,14 @@ int main(void)
 
     // Setup UART0 baud rate
     setUart0BaudRate(115200, 40e6);
+
+    //debugging code for heap allocation verification
+//    mystack = mystack+1024;
+//    char str[100];
+//    sprintf(str, "%p", mystack);
+//    putsUart0(str);
+//    putsUart0("\r\n");
+
 
     // Power-up flash
     GREEN_LED = 1;
