@@ -56,6 +56,7 @@
 #define YELLOW_LED       (*((volatile uint32_t *)(0x42000000 + (0x400243FC-0x40000000)*32 + 3*4)))
 #define GREEN_LED        (*((volatile uint32_t *)(0x42000000 + (0x400243FC-0x40000000)*32 + 4*4)))
 
+//bitbanding addresses for PUSH BUTTONS
 #define PUSH_BUTTON0  (*((volatile uint32_t *)(0x42000000 + (0x400043FC-0x40000000)*32 + 2*4)))
 #define PUSH_BUTTON1  (*((volatile uint32_t *)(0x42000000 + (0x400043FC-0x40000000)*32 + 3*4)))
 #define PUSH_BUTTON2  (*((volatile uint32_t *)(0x42000000 + (0x400043FC-0x40000000)*32 + 4*4)))
@@ -109,8 +110,6 @@
 //    while(PUSH_BUTTON5);
 //}
 
-uint32_t mystack;
-
 
 //-----------------------------------------------------------------------------
 // RTOS Defines and Kernel Variables
@@ -162,11 +161,11 @@ struct _tcb
     void *semaphore;               // pointer to the semaphore that is blocking the thread
 } tcb[MAX_TASKS];
 
-#pragma DATA_SECTION(pVectors, ".htable")
-void (* const pVectors[])(void) =
-{
-    (void (*)(void))((uint32_t)&mystack)
-};
+//Allocating 28KiB space for the heap in stack...2KiB for the MSP stack and remaining 2KiB for the OS variables/kernel
+#pragma DATA_SECTION(mystack, ".heap")
+uint32_t mystack[7168];
+
+uint32_t heap = (uint32_t*)mystack ;
 
 //-----------------------------------------------------------------------------
 // RTOS Kernel Functions
@@ -224,13 +223,12 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
             while (tcb[i].state != STATE_INVALID) {i++;}
             tcb[i].state = STATE_UNRUN;
             tcb[i].pid = fn;
-            tcb[i].spInit = mystack+stackBytes;
-            tcb[i].sp = mystack;
-            mystack = mystack+stackBytes;
+            tcb[i].spInit = heap + stackBytes;
+            tcb[i].sp = heap;
+            heap = heap + stackBytes;
             tcb[i].priority = priority;
             tcb[i].currentPriority = priority;
             copy(name,tcb[i].name);
-            //tcb[i].name = name;
             char str[100];
             putsUart0(tcb[i].name);
             putsUart0("\r\n");
@@ -238,9 +236,9 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
             putsUart0(str);
             sprintf(str,"%d\r\n", tcb[i].priority);
             putsUart0(str);
-            sprintf(str,"%p\r\n", tcb[i].sp);
+            sprintf(str,"%p\r\n", tcb[i].spInit);
             putsUart0(str);
-            sprintf(str,"%d\r\n", stackBytes);
+            sprintf(str,"%p\r\n", tcb[i].sp);
             putsUart0(str);
             // increment task count
             taskCount++;
@@ -283,12 +281,21 @@ int8_t createSemaphore(uint8_t count)
 // REQUIRED: modify this function to start the operating system, using all created tasks
 void startRtos()
 {
+    taskCurrent = rtosScheduler();
+    uint32_t SP = tcb[taskCurrent].spInit;
+    setPSP(SP);
+    setASP();
+    _fn fn = tcb[taskCurrent].pid;
+    fn();
+
 }
 
 // REQUIRED: modify this function to yield execution back to scheduler using pendsv
 // push registers, call scheduler, pop registers, return to new function
 void yield()
 {
+//      NVIC_SYS_HND_CTRL_R |= NVIC_SYS_HND_CTRL_SVC  // SVC Call Pending
+    __asm(" SVC #0");
 }
 
 // REQUIRED: modify this function to support 1ms system timer
@@ -320,12 +327,14 @@ void systickIsr()
 // REQUIRED: process UNRUN and READY tasks differently
 void pendSvIsr()
 {
+    BLUE_LED = 1; //debugging code
 }
 
 // REQUIRED: modify this function to add support for the service call
 // REQUIRED: in preemptive code, add code to handle synchronization primitives
 void svCallIsr()
 {
+    NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV ; //turning on the pendSV exception .... debugging code to verify
 }
 
 // REQUIRED: code this function
@@ -351,6 +360,12 @@ void usageFaultIsr()
 //-----------------------------------------------------------------------------
 // Subroutines
 //-----------------------------------------------------------------------------
+extern void usermode();
+extern void privilegedmode();
+extern void setPSP(uint32_t sp);
+extern void setASP();
+extern uint32_t getPSP();
+extern uint32_t getMSP();
 
 // Initialize Hardware
 // REQUIRED: Add initialization for blue, orange, red, green, and yellow LEDs
@@ -590,9 +605,9 @@ int main(void)
     setUart0BaudRate(115200, 40e6);
 
     //debugging code for heap allocation verification
-//    mystack = mystack+1024;
+//    heap = heap + 1024;
 //    char str[100];
-//    sprintf(str, "%p", mystack);
+//    sprintf(str, "%p", heap);
 //    putsUart0(str);
 //    putsUart0("\r\n");
 

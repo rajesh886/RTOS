@@ -1,1 +1,1 @@
-"./rtos.obj" "./tm4c123gh6pm_startup_ccs.obj" "./uart0.obj" "./wait.obj" "../tm4c123gh6pm.cmd" -llibc.a 
+"./rtos.obj" "./rtos_s.obj" "./tm4c123gh6pm_startup_ccs.obj" "./uart0.obj" "./wait.obj" "../tm4c123gh6pm.cmd" -llibc.a 

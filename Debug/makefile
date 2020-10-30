@@ -9,6 +9,7 @@ GEN_CMDS__FLAG :=
 
 ORDERED_OBJS += \
 "./rtos.obj" \
+"./rtos_s.obj" \
 "./tm4c123gh6pm_startup_ccs.obj" \
 "./uart0.obj" \
 "./wait.obj" \
@@ -141,7 +142,7 @@ all: $(OBJS) $(CMD_SRCS) $(GEN_CMDS)
 RTOS.out: $(OBJS) $(CMD_SRCS) $(GEN_CMDS)
 	@echo 'Building target: "$@"'
 	@echo 'Invoking: ARM Linker'
-	"/Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS/bin/armcl" -mv7M4 --code_state=16 --float_support=FPv4SPD16 -me --define=ccs="ccs" --define=PART_TM4C123GH6PM -g --gcc --diag_warning=225 --diag_wrap=off --display_error_number --abi=eabi -z -m"RTOS.map" --heap_size=0 --stack_size=4096 -i"/Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS/lib" -i"/Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS/include" --reread_libs --diag_wrap=off --display_error_number --warn_sections --xml_link_info="RTOS_linkInfo.xml" --rom_model -o "RTOS.out" $(ORDERED_OBJS)
+	"/Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS/bin/armcl" -mv7M4 --code_state=16 --float_support=FPv4SPD16 -me --define=ccs="ccs" --define=PART_TM4C123GH6PM -g --gcc --diag_warning=225 --diag_wrap=off --display_error_number --abi=eabi -z -m"RTOS.map" --heap_size=0 --stack_size=2048 -i"/Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS/lib" -i"/Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS/include" --reread_libs --diag_wrap=off --display_error_number --warn_sections --xml_link_info="RTOS_linkInfo.xml" --rom_model -o "RTOS.out" $(ORDERED_OBJS)
 	@echo 'Finished building target: "$@"'
 	@echo ' '
 
@@ -155,8 +156,9 @@ RTOS.hex: $(EXE_OUTPUTS)
 # Other Targets
 clean:
 	-$(RM) $(BIN_OUTPUTS__QUOTED)$(EXE_OUTPUTS__QUOTED)
-	-$(RM) "rtos.obj" "tm4c123gh6pm_startup_ccs.obj" "uart0.obj" "wait.obj" 
+	-$(RM) "rtos.obj" "rtos_s.obj" "tm4c123gh6pm_startup_ccs.obj" "uart0.obj" "wait.obj" 
 	-$(RM) "rtos.d" "tm4c123gh6pm_startup_ccs.d" "uart0.d" "wait.d" 
+	-$(RM) "rtos_s.d" 
 	-@echo 'Finished clean'
 	-@echo ' '
 

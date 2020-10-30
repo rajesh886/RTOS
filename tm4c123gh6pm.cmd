@@ -7,7 +7,7 @@
  *****************************************************************************/
 
 --retain=g_pfnVectors
---retain=pVectors
+--retain=mystack
 
 MEMORY
 {
@@ -42,7 +42,7 @@ SECTIONS
     .sysmem :   > SRAM
     .stack  :   > SRAM
 
-    .htable :   > 0x20001000
+    .heap :   > 0x20001000
     .data   :   > SRAM
     .bss    :   > SRAM
     .sysmem :   > SRAM
@@ -50,4 +50,3 @@ SECTIONS
 }
 
 __STACK_TOP = __stack + 512;
-mystack = 0x20001000;
