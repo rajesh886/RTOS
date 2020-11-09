@@ -284,6 +284,7 @@ void startRtos()
     taskCurrent = rtosScheduler();
     uint32_t SP = tcb[taskCurrent].spInit;
     setPSP(SP);
+    tcb[taskCurrent].state = STATE_READY;
     setASP();
     _fn fn = tcb[taskCurrent].pid;
     fn();
@@ -304,6 +305,7 @@ void yield()
 // return to new function (separate unrun or ready processing)
 void sleep(uint32_t tick)
 {
+    __asm(" SVC #1");
 }
 
 // REQUIRED: modify this function to wait a semaphore with priority inheritance
@@ -321,20 +323,160 @@ void post(int8_t semaphore)
 // REQUIRED: in preemptive code, add code to request task switch
 void systickIsr()
 {
+    uint8_t i = 0;
+    while(i < MAX_TASKS)
+    {
+        if(tcb[i].state == STATE_DELAYED)
+        {
+            tcb[i].ticks--;
+            if(tcb[i].ticks == 0)
+            {
+                tcb[i].state = STATE_READY;
+            }
+        }
+        i++;
+    }
 }
 
 // REQUIRED: in coop and preemptive, modify this function to add support for task switching
 // REQUIRED: process UNRUN and READY tasks differently
 void pendSvIsr()
 {
-    BLUE_LED = 1; //debugging code
+    //debugging code
+    //BLUE_LED = 1;
+    //step 6 code and discard
+//    __asm("     MRS R0, PSP");
+//    __asm("     STR R4, [R0, #-4]");
+//    __asm("     SUB R0, R0, #4");
+//    __asm("     STR R5, [R0, #-4]");
+//    __asm("     SUB R0, R0, #4");
+//    __asm("     STR R6, [R0, #-4]");
+//    __asm("     SUB R0, R0, #4");
+//    __asm("     STR R7, [R0, #-4]");
+//    __asm("     SUB R0, R0, #4");
+//    __asm("     STR R8, [R0, #-4]");
+//    __asm("     SUB R0, R0, #4");
+//    __asm("     STR R9, [R0, #-4]");
+//    __asm("     SUB R0, R0, #4");
+//    __asm("     STR R10, [R0, #-4]");
+//    __asm("     SUB R0, R0, #4");
+//    __asm("     STR R11, [R0, #-4]");
+//    __asm("     SUB R0, R0, #4");
+//    tcb[taskCurrent].sp = getPSP();
+//    taskCurrent = rtosScheduler();
+//    setPSP(tcb[taskCurrent].sp);
+//    __asm("     MRS R0, PSP");
+//    __asm("     LDR R4, [R0, #-4], #-4");
+//    __asm("     LDR R5, [R0, #-4], #-4");
+//    __asm("     LDR R6, [R0, #-4], #-4");
+//    __asm("     LDR R7, [R0, #-4], #-4");
+//    __asm("     LDR R8, [R0, #-4], #-4");
+//    __asm("     LDR R9, [R0, #-4], #-4");
+//    __asm("     LDR R10, [R0, #-4], #-4");
+//    __asm("     LDR R11, [R0, #-4], #-4");
+
+
+    //step 7
+    __asm("     MRS R0, PSP");
+    __asm("     STR R4, [R0, #-4]");
+    __asm("     SUB R0, R0, #4");
+    __asm("     STR R5, [R0, #-4]");
+    __asm("     SUB R0, R0, #4");
+    __asm("     STR R6, [R0, #-4]");
+    __asm("     SUB R0, R0, #4");
+    __asm("     STR R7, [R0, #-4]");
+    __asm("     SUB R0, R0, #4");
+    __asm("     STR R8, [R0, #-4]");
+    __asm("     SUB R0, R0, #4");
+    __asm("     STR R9, [R0, #-4]");
+    __asm("     SUB R0, R0, #4");
+    __asm("     STR R10, [R0, #-4]");
+    __asm("     SUB R0, R0, #4");
+    __asm("     STR R11, [R0, #-4]");
+    __asm("     SUB R0, R0, #4");
+    tcb[taskCurrent].sp = getPSP();
+    taskCurrent = rtosScheduler();
+    if(tcb[taskCurrent].state == STATE_READY){
+        setPSP(tcb[taskCurrent].sp);
+        __asm("     MRS R0, PSP");
+        __asm("     LDR R4, [R0, #-4], #-4");
+        __asm("     LDR R5, [R0, #-4], #-4");
+        __asm("     LDR R6, [R0, #-4], #-4");
+        __asm("     LDR R7, [R0, #-4], #-4");
+        __asm("     LDR R8, [R0, #-4], #-4");
+        __asm("     LDR R9, [R0, #-4], #-4");
+        __asm("     LDR R10, [R0, #-4], #-4");
+        __asm("     LDR R11, [R0, #-4], #-4");
+    }
+    else {
+        tcb[taskCurrent].state = STATE_READY;
+        setPSP((tcb[taskCurrent].spInit)-32);
+        _fn fn = tcb[taskCurrent].pid;
+
+        uint32_t *PSP = (uint32_t*) getPSP();
+
+        *PSP  = 0;
+        *(PSP + 1) = 1;
+        *(PSP + 2) = 2;
+        *(PSP + 3) = 3;
+        *(PSP + 4) = 12;
+        *(PSP + 5) = 0xFFFFFFFD;
+        *(PSP + 6) = fn;
+        *(PSP + 7) = 0x61000000;
+
+        //code and discard part below
+        //char str[100];
+//        sprintf(str,"%p\r\n", PSP);
+//        putsUart0(str);
+//        sprintf(str,"%p\r\n", (PSP + 1));
+//        putsUart0(str);
+//        sprintf(str,"%p\r\n", (PSP + 2));
+//        putsUart0(str);
+//        sprintf(str,"%p\r\n", (PSP + 3));
+//        putsUart0(str);
+//        sprintf(str,"%p\r\n",(PSP + 4));
+//        putsUart0(str);
+//        sprintf(str,"%p\r\n", (PSP + 5));
+//        putsUart0(str);
+//        sprintf(str,"%p\r\n", (PSP + 6));
+//        putsUart0(str);
+//        sprintf(str,"%p\r\n", (PSP + 7));
+//        putsUart0(str);
+
+    }
 }
 
 // REQUIRED: modify this function to add support for the service call
 // REQUIRED: in preemptive code, add code to handle synchronization primitives
 void svCallIsr()
 {
-    NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV ; //turning on the pendSV exception .... debugging code to verify
+    uint32_t R0, R1, R2, R3, R12, LR, PC, xPSR;
+    uint32_t *PSP = (uint32_t*) getPSP();
+    R0 = *PSP;
+    R1 = *(PSP+1);
+    R2 = *(PSP+2);
+    R3 = *(PSP+3);
+    R12 = *(PSP+4);
+    LR = *(PSP+5);
+    PC = *(PSP+6);
+    xPSR = *(PSP+7);
+    uint8_t n = getSVCNumber();
+
+    switch(n) {
+    case 0:
+        NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV ; //turning on the pendSV exception .... debugging code to verify
+        break;
+
+    case 1:
+        tcb[taskCurrent].ticks = R0;
+        tcb[taskCurrent].state = STATE_DELAYED;
+        NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV ;
+        NVIC_ST_RELOAD_R = 39999;
+        //NVIC_ST_CURRENT_R = 0;
+        NVIC_ST_CTRL_R |= 0x7; //Enabling clk_src(system clock), inten and enable bit
+        break;
+    }
+    //NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV ; //turning on the pendSV exception .... debugging code to verify
 }
 
 // REQUIRED: code this function
@@ -426,6 +568,15 @@ void copy(char s1[], char s2[]){
         }
     s2[i] = '\0';
 }
+
+uint8_t getSVCNumber()
+{
+    uint32_t *PSP = (uint32_t*) getPSP();
+    uint32_t *PC;
+    PC = *(PSP+6) - 2;
+
+    return *PC;
+}
 // ------------------------------------------------------------------------------
 //  Task functions
 // ------------------------------------------------------------------------------
@@ -436,12 +587,47 @@ void idle()
 {
     while(true)
     {
+        //code and discard
+        //char str[100];
+        //sprintf(str,"%p\r\n", tcb[taskCurrent].sp);
+        //putsUart0(str);
+        //Debugging code
+//        __asm("  MOV R0, #0");
+//        __asm("  MOV R1, #1");
+//        __asm("  MOV R2, #2");
+//        __asm("  MOV R3, #3");
+//        __asm("  MOV R12,#12");
+//        __asm("  MOV R4,#4");
+//        __asm("  MOV R5,#5");
         ORANGE_LED = 1;
         waitMicrosecond(1000);
         ORANGE_LED = 0;
         yield();
     }
 }
+
+//void idle2()
+//{
+//    while(true)
+//    {
+//        //code and discard
+//        //char str[100];
+//        //sprintf(str,"%p\r\n", tcb[taskCurrent].sp);
+//        //putsUart0(str);
+//        //Debugging code
+////        __asm("  MOV R0, #0");
+////        __asm("  MOV R1, #1");
+////        __asm("  MOV R2, #2");
+////        __asm("  MOV R3, #3");
+////        __asm("  MOV R12,#12");
+////        __asm("  MOV R4,#4");
+////        __asm("  MOV R5,#5");
+//        YELLOW_LED = 1;
+//        waitMicrosecond(1000);
+//        YELLOW_LED = 0;
+//        yield();
+//    }
+//}
 
 void flash4Hz()
 {
@@ -626,17 +812,19 @@ int main(void)
 
     // Add required idle process at lowest priority
     ok =  createThread(idle, "Idle", 15, 1024);
+    //Code and discard
+//    ok &=  createThread(idle2, "Idle2", 14, 1024);
 
     // Add other processes
-    ok &= createThread(lengthyFn, "LengthyFn", 12, 1024);
+//    ok &= createThread(lengthyFn, "LengthyFn", 12, 1024);
     ok &= createThread(flash4Hz, "Flash4Hz", 8, 1024);
-    ok &= createThread(oneshot, "OneShot", 4, 1024);
-    ok &= createThread(readKeys, "ReadKeys", 12, 1024);
-    ok &= createThread(debounce, "Debounce", 12, 1024);
-    ok &= createThread(important, "Important", 0, 1024);
-    ok &= createThread(uncooperative, "Uncoop", 10, 1024);
-    ok &= createThread(errant, "Errant", 8, 1024);
-    ok &= createThread(shell, "Shell", 8, 1024);
+//    ok &= createThread(oneshot, "OneShot", 4, 1024);
+//    ok &= createThread(readKeys, "ReadKeys", 12, 1024);
+//    ok &= createThread(debounce, "Debounce", 12, 1024);
+//    ok &= createThread(important, "Important", 0, 1024);
+//    ok &= createThread(uncooperative, "Uncoop", 10, 1024);
+//    ok &= createThread(errant, "Errant", 8, 1024);
+//    ok &= createThread(shell, "Shell", 8, 1024);
 
     // Start up RTOS
     if (ok)
