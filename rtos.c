@@ -123,8 +123,8 @@ typedef void (*_fn)();
 #define MAX_QUEUE_SIZE 5
 typedef struct _semaphore
 {
-    uint16_t count;
-    uint16_t queueSize;
+    uint16_t count;                         //no of items in semaphore
+    uint16_t queueSize;                     //no of items waiting to use process
     uint32_t processQueue[MAX_QUEUE_SIZE]; // store task index here
 } semaphore;
 
@@ -188,17 +188,37 @@ void initRtos()
 // REQUIRED: Implement prioritization to 16 levels
 int rtosScheduler()
 {
+    //Round Robin Scheduler
+//    bool ok;
+//    static uint8_t task = 0xFF;
+//    ok = false;
+//    while (!ok)
+//    {
+//        task++;
+//        if (task >= MAX_TASKS)
+//            task = 0;
+//        ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN);
+//    }
+//    return task;
+
+    //Priority Scheduler
+    uint8_t lastSearchedIndex[15];
     bool ok;
-    static uint8_t task = 0xFF;
+    uint8_t prev_task = 0;
+    uint8_t next_task = 1;
     ok = false;
     while (!ok)
     {
-        task++;
-        if (task >= MAX_TASKS)
-            task = 0;
-        ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN);
+        while(next_task <= MAX_TASKS){
+            if(tcb[prev_task].priority > tcb[next_task].priority){
+                prev_task = next_task;
+            }
+            next_task++;
+        }
+        next_task = 0;
+        lastSearched
     }
-    return task;
+    return prev_task;
 }
 
 bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackBytes)
@@ -312,11 +332,13 @@ void sleep(uint32_t tick)
 // return if avail (separate unrun or ready processing), else yield to scheduler using pendsv
 void wait(int8_t semaphore)
 {
+    __asm(" SVC #2");
 }
 
 // REQUIRED: modify this function to signal a semaphore is available using pendsv
 void post(int8_t semaphore)
 {
+    __asm(" SVC #3");
 }
 
 // REQUIRED: modify this function to add support for the system timer
@@ -475,6 +497,33 @@ void svCallIsr()
         //NVIC_ST_CURRENT_R = 0;
         NVIC_ST_CTRL_R |= 0x7; //Enabling clk_src(system clock), inten and enable bit
         break;
+
+    case 2:
+        if(semaphores[R0].count > 0){
+            semaphores[R0].count--;
+        }
+        else{
+            tcb[taskCurrent].state = STATE_BLOCKED;
+            tcb[taskCurrent].semaphore = &semaphores[R0];
+            semaphores[R0].processQueue[semaphores[R0].queueSize++] = taskCurrent;
+        }
+        NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV;
+        break;
+
+    case 3:
+        semaphores[R0].count++;
+        if(semaphores[R0].queueSize > 0){
+            tcb[semaphores[R0].processQueue[0]].state = STATE_READY;
+            uint8_t j = 0;
+            for(j = 0; j<semaphores[R0].queueSize; j++){
+                semaphores[R0].processQueue[j] = semaphores[R0].processQueue[j+1];
+            }
+            semaphores[R0].queueSize--;
+        }
+        if(tcb[semaphores[R0].processQueue[0]].currentPriority < tcb[taskCurrent].priority){
+            NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV;
+         }
+        break;
     }
     //NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV ; //turning on the pendSV exception .... debugging code to verify
 }
@@ -587,18 +636,6 @@ void idle()
 {
     while(true)
     {
-        //code and discard
-        //char str[100];
-        //sprintf(str,"%p\r\n", tcb[taskCurrent].sp);
-        //putsUart0(str);
-        //Debugging code
-//        __asm("  MOV R0, #0");
-//        __asm("  MOV R1, #1");
-//        __asm("  MOV R2, #2");
-//        __asm("  MOV R3, #3");
-//        __asm("  MOV R12,#12");
-//        __asm("  MOV R4,#4");
-//        __asm("  MOV R5,#5");
         ORANGE_LED = 1;
         waitMicrosecond(1000);
         ORANGE_LED = 0;
@@ -786,7 +823,6 @@ int main(void)
     initHw();
     initUart0();
     initRtos();
-
     // Setup UART0 baud rate
     setUart0BaudRate(115200, 40e6);
 
@@ -817,11 +853,11 @@ int main(void)
 
     // Add other processes
 //    ok &= createThread(lengthyFn, "LengthyFn", 12, 1024);
-    ok &= createThread(flash4Hz, "Flash4Hz", 8, 1024);
-//    ok &= createThread(oneshot, "OneShot", 4, 1024);
-//    ok &= createThread(readKeys, "ReadKeys", 12, 1024);
+    //ok &= createThread(flash4Hz, "Flash4Hz", 8, 1024);
+    ok &= createThread(oneshot, "OneShot", 4, 1024);
+    //ok &= createThread(readKeys, "ReadKeys", 12, 1024);
 //    ok &= createThread(debounce, "Debounce", 12, 1024);
-//    ok &= createThread(important, "Important", 0, 1024);
+    ok &= createThread(important, "Important", 0, 1024);
 //    ok &= createThread(uncooperative, "Uncoop", 10, 1024);
 //    ok &= createThread(errant, "Errant", 8, 1024);
 //    ok &= createThread(shell, "Shell", 8, 1024);
