@@ -118,6 +118,16 @@
 // function pointer
 typedef void (*_fn)();
 
+#define MAX_CHARS 80
+#define MAX_FIELDS 5
+typedef struct _USER_DATA
+{
+    char buffer[MAX_CHARS+1];
+    uint8_t fieldCount;
+    uint8_t fieldPosition[MAX_FIELDS];
+    char fieldType[MAX_FIELDS];
+}USER_DATA;
+
 // semaphore
 #define MAX_SEMAPHORES 5
 #define MAX_QUEUE_SIZE 5
@@ -186,6 +196,8 @@ void initRtos()
 }
 
 // REQUIRED: Implement prioritization to 16 levels
+uint8_t lastSearchedIndex[15];
+
 int rtosScheduler()
 {
     //Round Robin Scheduler
@@ -201,22 +213,23 @@ int rtosScheduler()
 //    }
 //    return task;
 
-    //Priority Scheduler
-    uint8_t lastSearchedIndex[15];
+    //Priority Scheduler step 2
     bool ok;
     uint8_t prev_task = 0;
     uint8_t next_task = 1;
     ok = false;
     while (!ok)
     {
-        while(next_task <= MAX_TASKS){
-            if(tcb[prev_task].priority > tcb[next_task].priority){
-                prev_task = next_task;
+        while(next_task < MAX_TASKS)
+        {
+            if(tcb[prev_task].priority >= tcb[next_task].priority)
+            {
+                if(tcb[next_task].state == STATE_READY || tcb[next_task].state == STATE_UNRUN)
+                    prev_task = next_task;
             }
             next_task++;
         }
-        next_task = 0;
-        lastSearched
+        ok = (tcb[prev_task].state == STATE_READY || tcb[prev_task].state == STATE_UNRUN);
     }
     return prev_task;
 }
@@ -484,7 +497,8 @@ void svCallIsr()
     xPSR = *(PSP+7);
     uint8_t n = getSVCNumber();
 
-    switch(n) {
+    switch(n)
+    {
     case 0:
         NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV ; //turning on the pendSV exception .... debugging code to verify
         break;
@@ -506,23 +520,26 @@ void svCallIsr()
             tcb[taskCurrent].state = STATE_BLOCKED;
             tcb[taskCurrent].semaphore = &semaphores[R0];
             semaphores[R0].processQueue[semaphores[R0].queueSize++] = taskCurrent;
+            NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV;
         }
-        NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV;
         break;
 
     case 3:
         semaphores[R0].count++;
-        if(semaphores[R0].queueSize > 0){
+        if(semaphores[R0].queueSize > 0)
+        {
             tcb[semaphores[R0].processQueue[0]].state = STATE_READY;
+            semaphores[R0].count--;
             uint8_t j = 0;
-            for(j = 0; j<semaphores[R0].queueSize; j++){
+            for(j = 0; j<semaphores[R0].queueSize; j++)
+            {
                 semaphores[R0].processQueue[j] = semaphores[R0].processQueue[j+1];
             }
             semaphores[R0].queueSize--;
         }
-        if(tcb[semaphores[R0].processQueue[0]].currentPriority < tcb[taskCurrent].priority){
-            NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV;
-         }
+//        if(tcb[semaphores[R0].processQueue[0]].currentPriority < tcb[taskCurrent].priority){
+//            NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV;
+//         }
         break;
     }
     //NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV ; //turning on the pendSV exception .... debugging code to verify
@@ -852,15 +869,16 @@ int main(void)
 //    ok &=  createThread(idle2, "Idle2", 14, 1024);
 
     // Add other processes
-//    ok &= createThread(lengthyFn, "LengthyFn", 12, 1024);
-    //ok &= createThread(flash4Hz, "Flash4Hz", 8, 1024);
+    ok &= createThread(lengthyFn, "LengthyFn", 12, 1024);
+    ok &= createThread(flash4Hz, "Flash4Hz", 8, 1024);
+
     ok &= createThread(oneshot, "OneShot", 4, 1024);
-    //ok &= createThread(readKeys, "ReadKeys", 12, 1024);
-//    ok &= createThread(debounce, "Debounce", 12, 1024);
+    ok &= createThread(readKeys, "ReadKeys", 12, 1024);
+    ok &= createThread(debounce, "Debounce", 12, 1024);
     ok &= createThread(important, "Important", 0, 1024);
-//    ok &= createThread(uncooperative, "Uncoop", 10, 1024);
-//    ok &= createThread(errant, "Errant", 8, 1024);
-//    ok &= createThread(shell, "Shell", 8, 1024);
+    //ok &= createThread(uncooperative, "Uncoop", 10, 1024);
+    //ok &= createThread(errant, "Errant", 8, 1024);
+    ok &= createThread(shell, "Shell", 8, 1024);
 
     // Start up RTOS
     if (ok)

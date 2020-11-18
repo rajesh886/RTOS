@@ -38,7 +38,7 @@ privilegedmode:
                BX     LR                     ; return from subroutine
 
 setPSP:
-			   ;LDR    R0, PSP_LOCATION
+
                MSR    PSP, R0
                DSB
                ISB

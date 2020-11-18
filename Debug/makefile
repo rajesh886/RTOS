@@ -2,7 +2,7 @@
 # Automatically-generated file. Do not edit!
 ################################################################################
 
-CG_TOOL_ROOT := /Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS
+CG_TOOL_ROOT := /Applications/ti/ccs/tools/compiler/ti-cgt-arm_20.2.1.LTS
 
 GEN_OPTS__FLAG := 
 GEN_CMDS__FLAG := 
@@ -142,14 +142,14 @@ all: $(OBJS) $(CMD_SRCS) $(GEN_CMDS)
 RTOS.out: $(OBJS) $(CMD_SRCS) $(GEN_CMDS)
 	@echo 'Building target: "$@"'
 	@echo 'Invoking: ARM Linker'
-	"/Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS/bin/armcl" -mv7M4 --code_state=16 --float_support=FPv4SPD16 -me --define=ccs="ccs" --define=PART_TM4C123GH6PM -g --gcc --diag_warning=225 --diag_wrap=off --display_error_number --abi=eabi -z -m"RTOS.map" --heap_size=0 --stack_size=2048 -i"/Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS/lib" -i"/Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS/include" --reread_libs --diag_wrap=off --display_error_number --warn_sections --xml_link_info="RTOS_linkInfo.xml" --rom_model -o "RTOS.out" $(ORDERED_OBJS)
+	"/Applications/ti/ccs/tools/compiler/ti-cgt-arm_20.2.1.LTS/bin/armcl" -mv7M4 --code_state=16 --float_support=FPv4SPD16 -me --define=ccs="ccs" --define=PART_TM4C123GH6PM -g --gcc --diag_warning=225 --diag_wrap=off --display_error_number --abi=eabi -z -m"RTOS.map" --heap_size=0 --stack_size=2048 -i"/Applications/ti/ccs/tools/compiler/ti-cgt-arm_20.2.1.LTS/lib" -i"/Applications/ti/ccs/tools/compiler/ti-cgt-arm_20.2.1.LTS/include" --reread_libs --diag_wrap=off --display_error_number --warn_sections --xml_link_info="RTOS_linkInfo.xml" --rom_model -o "RTOS.out" $(ORDERED_OBJS)
 	@echo 'Finished building target: "$@"'
 	@echo ' '
 
 RTOS.hex: $(EXE_OUTPUTS)
 	@echo 'Building files: $(strip $(EXE_OUTPUTS__QUOTED))'
 	@echo 'Invoking: ARM Hex Utility'
-	"/Applications/ti/ccs930/ccs/tools/compiler/ti-cgt-arm_18.12.5.LTS/bin/armhex"  -o "RTOS.hex" $(EXE_OUTPUTS__QUOTED)
+	"/Applications/ti/ccs/tools/compiler/ti-cgt-arm_20.2.1.LTS/bin/armhex"  -o "RTOS.hex" $(EXE_OUTPUTS__QUOTED)
 	@echo 'Finished building: $(strip $(EXE_OUTPUTS__QUOTED))'
 	@echo ' '
 
