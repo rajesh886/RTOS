@@ -80,36 +80,6 @@
 #define PUSH_BUTTON_MASK4 64
 #define PUSH_BUTTON_MASK5 128
 
-//void waitPbPress0()
-//{
-//    while(PUSH_BUTTON0);
-//}
-//
-//void waitPbPress1()
-//{
-//    while(PUSH_BUTTON1);
-//}
-//
-//void waitPbPress2()
-//{
-//    while(PUSH_BUTTON2);
-//}
-//
-//void waitPbPress3()
-//{
-//    while(PUSH_BUTTON3);
-//}
-//
-//void waitPbPress4()
-//{
-//    while(PUSH_BUTTON4);
-//}
-//
-//void waitPbPress5()
-//{
-//    while(PUSH_BUTTON5);
-//}
-
 
 //-----------------------------------------------------------------------------
 // RTOS Defines and Kernel Variables
@@ -128,6 +98,16 @@ typedef struct _USER_DATA
     char fieldType[MAX_FIELDS];
 }USER_DATA;
 
+//shell
+struct _shell
+{
+    char str[21];              //name of the pid
+    uint32_t pid;                       //address of the pid
+    int8_t mode;                       //round robin or priority
+    int8_t preempt;                       //preemption on = true and off = false
+    int8_t pi;                            //priority inheritance on or off
+}myshell;
+
 // semaphore
 #define MAX_SEMAPHORES 5
 #define MAX_QUEUE_SIZE 5
@@ -136,6 +116,7 @@ typedef struct _semaphore
     uint16_t count;                         //no of items in semaphore
     uint16_t queueSize;                     //no of items waiting to use process
     uint32_t processQueue[MAX_QUEUE_SIZE]; // store task index here
+    char name[16];
 } semaphore;
 
 semaphore semaphores[MAX_SEMAPHORES];
@@ -154,6 +135,13 @@ uint8_t keyPressed, keyReleased, flashReq, resource;
 #define MAX_TASKS 12       // maximum number of valid tasks
 uint8_t taskCurrent = 0;   // index of last dispatched task
 uint8_t taskCount = 0;     // total number of valid tasks
+uint32_t initial_time = 0;
+uint32_t final_time = 0;
+uint32_t time_difference;
+uint32_t total_time = 0;
+uint32_t total_time_temp = 0;
+uint32_t j = 0; //global variable to swap the buffer
+uint32_t N = 0;     //variable to keep track of the Number of times the systick isr is called.
 
 // REQUIRED: add store and management for the memory used by the thread stacks
 //           thread stacks must start on 1 kiB boundaries so mpu can work correctly
@@ -169,12 +157,13 @@ struct _tcb
     uint32_t ticks;                // ticks until sleep complete
     char name[16];                 // name of task used in ps command
     void *semaphore;               // pointer to the semaphore that is blocking the thread
+    uint32_t t1;
+    uint32_t swapBuffer[2];
 } tcb[MAX_TASKS];
 
 //Allocating 28KiB space for the heap in stack...2KiB for the MSP stack and remaining 2KiB for the OS variables/kernel
 #pragma DATA_SECTION(mystack, ".heap")
 uint32_t mystack[7168];
-
 uint32_t heap = (uint32_t*)mystack ;
 
 //-----------------------------------------------------------------------------
@@ -196,42 +185,65 @@ void initRtos()
 }
 
 // REQUIRED: Implement prioritization to 16 levels
-uint8_t lastSearchedIndex[15];
-
+uint32_t last_searched_task[16];
+uint16_t prio = 0;
 int rtosScheduler()
 {
-    //Round Robin Scheduler
-//    bool ok;
-//    static uint8_t task = 0xFF;
-//    ok = false;
-//    while (!ok)
-//    {
-//        task++;
-//        if (task >= MAX_TASKS)
-//            task = 0;
-//        ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN);
-//    }
-//    return task;
-
-    //Priority Scheduler step 2
     bool ok;
-    uint8_t prev_task = 0;
-    uint8_t next_task = 1;
     ok = false;
-    while (!ok)
+    //Round Robin Scheduler
+    if(myshell.mode == 1)
     {
-        while(next_task < MAX_TASKS)
+        bool ok;
+        static uint8_t task = 0xFF;
+        ok = false;
+        while (!ok)
         {
-            if(tcb[prev_task].priority >= tcb[next_task].priority)
-            {
-                if(tcb[next_task].state == STATE_READY || tcb[next_task].state == STATE_UNRUN)
-                    prev_task = next_task;
-            }
-            next_task++;
+            task++;
+            if (task >= MAX_TASKS)
+                task = 0;
+            ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN);
         }
-        ok = (tcb[prev_task].state == STATE_READY || tcb[prev_task].state == STATE_UNRUN);
+        return task;
     }
-    return prev_task;
+
+    else if(myshell.mode == 0)
+    {
+        while (!ok)
+        {
+            uint8_t prev_task = last_searched_task[prio];
+            uint8_t i = 0;
+            if(prev_task > 0)
+            {
+                prev_task++;
+                i++;
+            }
+            while(prev_task < MAX_TASKS)
+            {
+
+                if((tcb[prev_task].currentPriority == prio && (tcb[prev_task].state == STATE_UNRUN || tcb[prev_task].state == STATE_READY)))
+                {
+
+                    last_searched_task[prio] = prev_task;
+
+                    ok = true;
+                    return prev_task;
+                }
+                prev_task++;
+
+                i++;
+            }
+
+            if(prev_task == MAX_TASKS)
+            {
+               last_searched_task[prio] = 0;
+               prio = prio + 1;
+            }
+
+            if(prio == 15) prio = 0;
+        }
+    }
+
 }
 
 bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackBytes)
@@ -262,17 +274,17 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
             tcb[i].priority = priority;
             tcb[i].currentPriority = priority;
             copy(name,tcb[i].name);
-            char str[100];
-            putsUart0(tcb[i].name);
-            putsUart0("\r\n");
-            sprintf(str,"%p\r\n", tcb[i].pid);
-            putsUart0(str);
-            sprintf(str,"%d\r\n", tcb[i].priority);
-            putsUart0(str);
-            sprintf(str,"%p\r\n", tcb[i].spInit);
-            putsUart0(str);
-            sprintf(str,"%p\r\n", tcb[i].sp);
-            putsUart0(str);
+//            char str[100];
+//            putsUart0(tcb[i].name);
+//            putsUart0("\r\n");
+//            sprintf(str,"%p\r\n", tcb[i].pid);
+//            putsUart0(str);
+//            sprintf(str,"%d\r\n", tcb[i].priority);
+//            putsUart0(str);
+//            sprintf(str,"%p\r\n", tcb[i].spInit);
+//            putsUart0(str);
+//            sprintf(str,"%p\r\n", tcb[i].sp);
+//            putsUart0(str);
             // increment task count
             taskCount++;
             ok = true;
@@ -299,12 +311,13 @@ void setThreadPriority(_fn fn, uint8_t priority)
 {
 }
 
-int8_t createSemaphore(uint8_t count)
+int8_t createSemaphore(uint8_t count, char str[])
 {
     int8_t index = -1;
     if (semaphoreCount < MAX_SEMAPHORES)
     {
         semaphores[semaphoreCount].count = count;
+        copy(str,semaphores[semaphoreCount].name);
         index = semaphoreCount;
         semaphoreCount++;
     }
@@ -317,6 +330,17 @@ void startRtos()
     taskCurrent = rtosScheduler();
     uint32_t SP = tcb[taskCurrent].spInit;
     setPSP(SP);
+
+    //Timer code
+    //Enable clocks
+    SYSCTL_RCGCTIMER_R |= SYSCTL_RCGCTIMER_R1;
+
+    // Configure Timer 1 as the time base
+    TIMER1_CTL_R &= ~TIMER_CTL_TAEN;                                // turn-off timer before reconfiguring
+    TIMER1_CFG_R = TIMER_CFG_32_BIT_TIMER;                          // configure as 32-bit timer (A+B)
+    TIMER1_TAMR_R = TIMER_TAMR_TAMR_PERIOD | TIMER_TAMR_TACDIR;     // configure for periodic mode (count down)
+    TIMER1_CTL_R |= TIMER_CTL_TAEN;                                 // turn-on timer
+
     tcb[taskCurrent].state = STATE_READY;
     setASP();
     _fn fn = tcb[taskCurrent].pid;
@@ -370,6 +394,20 @@ void systickIsr()
             }
         }
         i++;
+    }
+
+    N++;
+    uint8_t k = 0;
+    if(N == 1000)
+    {
+        while(k < MAX_TASKS)
+        {
+          tcb[k].swapBuffer[j] = tcb[k].t1;
+          k++;
+        }
+        j = 1-j;
+        total_time_temp = total_time;
+        total_time = 0;
     }
 }
 
@@ -430,7 +468,19 @@ void pendSvIsr()
     __asm("     STR R11, [R0, #-4]");
     __asm("     SUB R0, R0, #4");
     tcb[taskCurrent].sp = getPSP();
+
+    TIMER1_CTL_R &= ~TIMER_CTL_TAEN;       //turn off timer1
+    final_time =TIMER1_TAV_R;
+    TIMER1_TAV_R=0;
+
+    time_difference = final_time - initial_time;
+    total_time += time_difference;
+    tcb[taskCurrent].t1 = time_difference;
+
     taskCurrent = rtosScheduler();
+    TIMER1_CTL_R |= TIMER_CTL_TAEN;
+    initial_time =TIMER1_TAV_R;
+
     if(tcb[taskCurrent].state == STATE_READY){
         setPSP(tcb[taskCurrent].sp);
         __asm("     MRS R0, PSP");
@@ -496,6 +546,10 @@ void svCallIsr()
     PC = *(PSP+6);
     xPSR = *(PSP+7);
     uint8_t n = getSVCNumber();
+    uint8_t numTasks = 0;
+    semaphore *temp_semaphore;
+    char *pid_name = (char*)R0;
+
 
     switch(n)
     {
@@ -519,7 +573,8 @@ void svCallIsr()
         else{
             tcb[taskCurrent].state = STATE_BLOCKED;
             tcb[taskCurrent].semaphore = &semaphores[R0];
-            semaphores[R0].processQueue[semaphores[R0].queueSize++] = taskCurrent;
+            semaphores[R0].processQueue[semaphores[R0].queueSize] = taskCurrent;
+            semaphores[R0].queueSize++;
             NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV;
         }
         break;
@@ -541,8 +596,161 @@ void svCallIsr()
 //            NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV;
 //         }
         break;
+
+    case 5:
+        putsUart0("Name\t\t PID\t\t%CPU\t\tPriority\t\tState\r\n");
+        while(numTasks < taskCount)
+        {
+            copy(tcb[numTasks].name, myshell.str);
+            putsUart0(myshell.str);
+            uint16_t len = getLength(myshell.str);
+            if( len <= 7)
+            {
+                putsUart0("\t\t");
+            }
+            else
+            {
+                putsUart0("\t");
+            }
+
+            uint16_t val = tcb[numTasks].pid;
+            uint32_tToHex(val);
+            putsUart0("\t\t");
+
+            //Location holder for %CPU
+            uint32_t t = tcb[numTasks].swapBuffer[1-j];
+            uint32_t process_time = (t*10000)/total_time_temp;
+            IntegerToString(process_time,myshell.str);
+            putsUart0(myshell.str);
+            putsUart0("\t\t");
+
+            IntegerToString(tcb[numTasks].currentPriority,myshell.str);
+            putsUart0(myshell.str);
+            putsUart0("\t\t");
+
+            uint8_t tempState = tcb[numTasks].state;
+            if(tempState == 0)
+            {
+                putsUart0("INVALID");
+            }
+            if(tempState == 1)
+            {
+                putsUart0("UNRUN");
+            }
+            if(tempState == 2)
+            {
+                putsUart0("READY");
+            }
+            if(tempState == 3)
+            {
+                putsUart0("DELAYED FOR ");
+                IntegerToString(tcb[numTasks].ticks,myshell.str);
+                putsUart0(myshell.str);
+                putsUart0("ms");
+            }
+            if(tempState == 4)
+            {
+                putsUart0("BLOCKED BY ");
+                temp_semaphore = tcb[numTasks].semaphore;
+                copy(temp_semaphore->name,myshell.str);
+                putsUart0(myshell.str);
+
+            }
+            putsUart0("\t");
+
+            numTasks++;
+            putsUart0("\r\n");
+
+        }
+
+        break;
+
+    case 6:
+        putsUart0("Name\t\tCount\tWaiting Threads\r\n");
+        while(numTasks < semaphoreCount)
+        {
+            copy(semaphores[numTasks].name,myshell.str);
+            putsUart0(myshell.str);
+            putsUart0("\t");
+
+            IntegerToString(semaphores[numTasks].count,myshell.str);
+            putsUart0(myshell.str);
+            putsUart0("\t");
+
+            int8_t queue_size = semaphores[numTasks].queueSize;
+            for(queue_size = semaphores[numTasks].queueSize; queue_size >= 0 ; queue_size--)
+            {
+                copy(tcb[semaphores[numTasks].processQueue[queue_size]].name,myshell.str);
+                putsUart0(myshell.str);
+                putsUart0("   ");
+            }
+
+            numTasks++;
+            putsUart0("\r\n");
+        }
+        break;
+
+    case 7:
+        numTasks = 1;
+        if((uint32_t)tcb[0].pid == R0)
+        {
+           putsUart0("Cannot kill the Idle process.\r\n");
+        }
+        while((numTasks) < taskCount)
+        {
+           if((uint32_t)tcb[numTasks].pid == R0)
+           {
+                tcb[numTasks].state = STATE_INVALID;
+           }
+            numTasks++;
+        }
+
+        break;
+    case 8:
+        myshell.pi = R0;
+        break;
+    case 9:
+        myshell.preempt = R0;
+        break;
+    case 10:
+        myshell.mode = R0;
+        break;
+
+    case 11:
+
+        while(numTasks < taskCount)
+        {
+            if(compare(tcb[numTasks].name,pid_name))
+            {
+
+                uint16_t val = tcb[numTasks].pid;
+                uint32_tToHex(val);
+                putsUart0("\r\n");
+            }
+            numTasks++;
+        }
+
+        break;
+
+    case 12:
+        while(numTasks < taskCount)
+        {
+            if(compare(tcb[numTasks].name,pid_name))
+            {
+                if(tcb[numTasks].state != STATE_READY)
+                {
+                    tcb[numTasks].state = STATE_READY;
+                }
+            }
+            numTasks++;
+        }
+
+        break;
+
+    case 13:
+        NVIC_APINT_R = NVIC_APINT_VECTKEY | NVIC_APINT_SYSRESETREQ|NVIC_APINT_VECT_RESET;
+        break;
     }
-    //NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV ; //turning on the pendSV exception .... debugging code to verify
 }
 
 // REQUIRED: code this function
@@ -635,6 +843,16 @@ void copy(char s1[], char s2[]){
     s2[i] = '\0';
 }
 
+uint16_t getLength(char str[])
+{
+    uint8_t i=0;
+    while(str[i] != '\0')
+    {
+        i++;
+    }
+    return i;
+}
+
 uint8_t getSVCNumber()
 {
     uint32_t *PSP = (uint32_t*) getPSP();
@@ -642,6 +860,353 @@ uint8_t getSVCNumber()
     PC = *(PSP+6) - 2;
 
     return *PC;
+}
+
+//this function converts uint32_t value into hexadecimal value and prints the result.
+void uint32_tToHex(uint32_t decimal){
+    uint32_t quotient, remainder;
+    int i,j = 0;
+    char hex[100];
+
+    quotient = decimal;
+
+    while (quotient != 0)
+    {
+       remainder = quotient % 16;
+       if (remainder < 10){
+           hex[j++] = 48 + remainder;
+       }
+
+       else{
+           hex[j++] = 55 + remainder;
+       }
+
+          quotient = quotient / 16;
+     }
+
+//    if(quotient == 0 && j != 8){
+//        while(j!=8){
+//            hex[j++] = 48;
+//        }
+//    }
+
+    for (i = j-1; i >= 0; i--)
+           putcUart0(hex[i]);
+}
+
+void IntegerToString(uint32_t num, char str[])
+{
+    uint32_t i, rem, len = 0, n;
+
+    n = num;
+    if(n == 0)
+    {
+        str[len] = '0';
+        str[len+1] = '\0';
+    }
+
+    else
+    {
+        while (n != 0)
+        {
+            len++;
+            n /= 10;
+        }
+        for (i = 0; i < len; i++)
+        {
+            rem = num % 10;
+            num = num / 10;
+            str[len - (i + 1)] = rem + '0';
+        }
+
+        str[len] = '\0';
+
+    }
+}
+
+int StringToInteger(char* str)
+{
+    uint32_t num = 0;
+    int i;
+
+    for (i = 0; str[i] != '\0'; ++i)
+        num = num * 10 + str[i] - '0';
+
+
+    return num;
+}
+
+uint32_t hex2int(char hex[]) {
+    uint32_t val = 0;
+    int i =0;
+    while (hex[i] != 0) {
+        // get current character then increment
+        uint8_t byte = hex[i];
+        // transform hex character to the 4bit equivalent number, using the ascii table indexes
+        if (byte >= '0' && byte <= '9') byte = byte - '0';
+        else if (byte >= 'a' && byte <='f') byte = byte - 'a' + 10;
+        else if (byte >= 'A' && byte <='F') byte = byte - 'A' + 10;
+        // shift 4 to make space for new digit, and add the 4 bits of the new digit
+        val = (val << 4) | (byte & 0xF);
+        i++;
+    }
+    return val;
+}
+
+//This function receives characters from the user interface
+void getsUart0(USER_DATA* data)
+{
+  uint8_t count = 0;
+  while(true){
+
+    char c;
+    c = getcUart0();
+
+    if(c==127||c==8)  //checking if the character entered is DEL or backspace
+    {
+       if(count>0)
+       {
+         count--;
+         continue;
+       }
+       else{
+       continue;
+       }
+    }
+
+    else if(c==10 || c==13) //checking if the character entered is Line feed or carriage return
+    {
+       data->buffer[count]='\0';
+       return;
+    }
+
+    else if(c >= 32)
+    {
+       if(count==MAX_CHARS) //if the count of characters in the buffer is equal to the maximum, then put the null
+                             //character in the end of the buffer. Else, increment the count.
+       {
+         data->buffer[count]='\0';
+         return;
+       }
+
+       else{
+       data->buffer[count++]=c;
+       continue;
+       }
+
+     }
+
+  }
+}
+
+/* this function checks whether the character is alphabet or not
+ * 65-90 = A - Z & 97 - 122 = a - z */
+bool alpha(char c)
+{
+  if((c>=65 && c<=90) || (c>=97 && c<=122))
+  {
+      return true;
+  }
+  else{
+      return false;
+  }
+}
+
+/* this function checks whether the character is numeric or not
+ * 48 - 57 = 0 - 9, 45 is hyphen & 46 is dot*/
+bool numeric(char c)
+{
+    if((c<=9) || (c>=48 && c<=57) || (c>=45 && c<=46))
+    {
+       return true;
+    }
+    else{
+       return false;
+    }
+}
+
+/* This is a function that takes the buffer string from the getsUart0() function and
+processes the string in-place and returns information about the parsed fields in
+fieldCount, fieldPosition, and fieldType. */
+void parseFields(USER_DATA* data)
+{
+    uint8_t Count = 0; //number of field counts
+    uint8_t i = 0;     //keeps track of offset of the field within the buffer
+
+    while( (data->buffer[i] != 0))
+    {
+        if(data->fieldCount == MAX_FIELDS)
+        {
+
+            return;
+        }
+
+        if(i == 0 && ( (alpha(data->buffer[i])) || (numeric(data->buffer[i])) ) )
+        {
+          if( (alpha(data->buffer[i])) )
+          {
+             data->fieldPosition[Count] = i;
+             data->fieldType[Count] = 97;     //record the type of field. 97 - a and 110 - n
+             data->fieldCount = Count+1;
+             Count++;
+          }
+          else if( numeric(data->buffer[i]) )
+          {
+
+              data->fieldPosition[Count] = i;
+              data->fieldType[Count] = 110;
+              data->fieldCount = Count+1;
+              Count++;
+
+          }
+
+        }
+
+        if( !(alpha(data->buffer[i])) && !(numeric(data->buffer[i])) )
+        {
+            data->buffer[i] = 0;
+
+            if(alpha(data->buffer[i+1]))
+            {
+
+                data->fieldPosition[Count] = i+1;
+                data->fieldType[Count] = 97;
+                data->fieldCount = Count+1;
+                Count++;
+
+
+            }
+
+            else if(numeric(data->buffer[i+1]))
+            {
+
+                data->fieldPosition[Count] = i+1;
+                data->fieldType[Count] = 110;
+                data->fieldCount = Count+1;
+                Count++;
+
+            }
+         }
+
+        i++;
+    }
+}
+
+/* Returns the value of a field requested if the field number is in range or NULL otherwise */
+char* getFieldString(USER_DATA* data, uint8_t fieldNumber)
+{
+    if(fieldNumber <= data->fieldCount)
+    {
+       if(data->fieldType[fieldNumber] == 97)
+       {
+          return &data->buffer[data->fieldPosition[fieldNumber]];
+       }
+    }
+
+      return '\0';
+}
+
+/* Returns a pointer to the field requested if the field number is in range and the field type
+is numeric or 0 otherwise */
+int32_t getFieldInteger(USER_DATA* data, uint8_t fieldNumber)
+{
+    char num[5];
+    if(fieldNumber <= data->fieldCount)
+    {
+        if(data->fieldType[fieldNumber] == 110)
+        {
+            //this part of code will run until the null char is reached.
+            uint8_t count = data->fieldPosition[fieldNumber];
+            uint8_t pos=0;
+            while(data->buffer[count] != 0)
+            {
+                num[pos] = data->buffer[count];
+                pos++;
+                count++;
+            }
+            num[pos] = '\0';
+            int32_t value = hex2int(num);
+            return value;
+        }
+    }
+
+    return 0;
+}
+
+//this function compares two strings.
+bool compare(char *str1, char *str2)
+{
+    while (*str1 == *str2 || *str1+32 == *str2)
+    {
+        if (*str1 == '\0' && *str2 == '\0')
+            return true;
+        str1++;
+        str2++;
+    }
+
+    return false;
+}
+
+/* This function returns true if the command matches the first field and the number of
+arguments (excluding the command field) is greater than or equal to the requested
+number of minimum arguments */
+bool isCommand(USER_DATA* data, const char strCommand[], uint8_t minArguments)
+{
+    char *name = &data->buffer[data->fieldPosition[0]];
+
+    if(compare(name, strCommand))
+    {
+        if((data->fieldCount)-1 >= minArguments)
+        {
+            return true;
+        }
+
+ }
+
+  return false;
+}
+
+void ps()
+{
+    __asm(" SVC #5");
+}
+
+void ipcs()
+{
+    __asm(" SVC #6");
+}
+
+void kill(uint32_t val){
+    __asm(" SVC #7");
+}
+
+void pi(int8_t val){
+    __asm(" SVC #8");
+}
+
+void preempt(int8_t val)
+{
+    __asm(" SVC #9");
+}
+
+void sched(int8_t val)
+{
+    __asm(" SVC #10");
+}
+
+void pidof(char name[])
+{
+    __asm(" SVC #11");
+}
+
+void proc_name(char name[])
+{
+    __asm(" SVC #12");
+}
+
+void reboot()
+{
+    __asm(" SVC #13");
 }
 // ------------------------------------------------------------------------------
 //  Task functions
@@ -804,8 +1369,10 @@ void errant()
         {
             *p = 0;
         }
+
         yield();
     }
+
 }
 
 void important()
@@ -823,9 +1390,104 @@ void important()
 // REQUIRED: add processing for the shell commands through the UART here
 void shell()
 {
+
+    USER_DATA data;
+
     while (true)
     {
+        getsUart0(&data);
+
+        putsUart0(data.buffer);
+
+        putsUart0("\r\n");
+
+        parseFields(&data);
+
+        bool valid = false;
+
+        if(isCommand(&data, "reboot", 0))
+        {
+          reboot();
+          valid=true;
+        }
+
+        if(isCommand(&data, "ps", 0))
+        {
+            ps();
+            valid = true;
+        }
+
+        if(isCommand(&data, "ipcs", 0))
+        {
+            ipcs();
+            valid = true;
+        }
+
+        if(isCommand(&data, "kill", 1))
+        {
+            kill(getFieldInteger(&data,1));
+
+            valid = true;
+        }
+
+        if(isCommand(&data, "pi", 1))
+        {
+            if(compare(getFieldString(&data,1),"on"))
+            {
+                pi(1);
+            }
+            else if(compare(getFieldString(&data,1),"off"))
+            {
+                pi(0);
+            }
+
+            valid = true;
+        }
+
+        if(isCommand(&data, "preempt", 1))
+        {
+            if(compare(getFieldString(&data,1),"on"))
+            {
+                preempt(1);
+            }
+            else if(compare(getFieldString(&data,1),"off"))
+            {
+                preempt(0);
+            }
+            valid = true;
+        }
+
+        if(isCommand(&data, "sched", 1))
+        {
+            if(compare(getFieldString(&data,1),"rr"))
+            {
+                sched(1);
+            }
+            else if(compare(getFieldString(&data,1),"prio"))
+            {
+                sched(0);
+            }
+            valid = true;
+        }
+
+        if(isCommand(&data, "pidof", 1))
+        {
+            pidof(getFieldString(&data,1));
+            valid = true;
+        }
+
+        if(isCommand(&data, "run", 1))
+        {
+            proc_name(getFieldString(&data,1));
+            valid = true;
+        }
+
+        putsUart0("\r\n");
+
+        if(!valid)
+            putsUart0("Invalid Command\r\n");
     }
+
 }
 
 //-----------------------------------------------------------------------------
@@ -843,14 +1505,6 @@ int main(void)
     // Setup UART0 baud rate
     setUart0BaudRate(115200, 40e6);
 
-    //debugging code for heap allocation verification
-//    heap = heap + 1024;
-//    char str[100];
-//    sprintf(str, "%p", heap);
-//    putsUart0(str);
-//    putsUart0("\r\n");
-
-
     // Power-up flash
     GREEN_LED = 1;
     waitMicrosecond(250000);
@@ -858,10 +1512,10 @@ int main(void)
     waitMicrosecond(250000);
 
     // Initialize semaphores
-    keyPressed = createSemaphore(1);
-    keyReleased = createSemaphore(0);
-    flashReq = createSemaphore(5);
-    resource = createSemaphore(1);
+    keyPressed = createSemaphore(1, "keyPressed");
+    keyReleased = createSemaphore(0, "keyReleased");
+    flashReq = createSemaphore(5, "flashReq");
+    resource = createSemaphore(1, "resource");
 
     // Add required idle process at lowest priority
     ok =  createThread(idle, "Idle", 15, 1024);
@@ -876,8 +1530,8 @@ int main(void)
     ok &= createThread(readKeys, "ReadKeys", 12, 1024);
     ok &= createThread(debounce, "Debounce", 12, 1024);
     ok &= createThread(important, "Important", 0, 1024);
-    //ok &= createThread(uncooperative, "Uncoop", 10, 1024);
-    //ok &= createThread(errant, "Errant", 8, 1024);
+    ok &= createThread(uncooperative, "Uncoop", 10, 1024);
+    ok &= createThread(errant, "Errant", 8, 1024);
     ok &= createThread(shell, "Shell", 8, 1024);
 
     // Start up RTOS
