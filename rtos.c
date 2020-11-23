@@ -106,6 +106,7 @@ struct _shell
     int8_t mode;                       //round robin or priority
     int8_t preempt;                       //preemption on = true and off = false
     int8_t pi;                            //priority inheritance on or off
+    int8_t mpu_mode;                       //0 - mpu off and 1 - mpu on
 }myshell;
 
 // semaphore
@@ -116,6 +117,7 @@ typedef struct _semaphore
     uint16_t count;                         //no of items in semaphore
     uint16_t queueSize;                     //no of items waiting to use process
     uint32_t processQueue[MAX_QUEUE_SIZE]; // store task index here
+    uint32_t lastWaitThread;
     char name[16];
 } semaphore;
 
@@ -157,7 +159,7 @@ struct _tcb
     uint32_t ticks;                // ticks until sleep complete
     char name[16];                 // name of task used in ps command
     void *semaphore;               // pointer to the semaphore that is blocking the thread
-    uint32_t t1;
+    uint32_t task_time;
     uint32_t swapBuffer[2];
 } tcb[MAX_TASKS];
 
@@ -187,6 +189,7 @@ void initRtos()
 // REQUIRED: Implement prioritization to 16 levels
 uint32_t last_searched_task[16];
 uint16_t prio = 0;
+uint8_t run_task = 16;
 int rtosScheduler()
 {
     bool ok;
@@ -207,40 +210,45 @@ int rtosScheduler()
         return task;
     }
 
+    //default is priority scheduling
     else if(myshell.mode == 0)
     {
         while (!ok)
         {
+            //get the last dispatched task for the current priority
             uint8_t prev_task = last_searched_task[prio];
-            uint8_t i = 0;
-            if(prev_task > 0)
+            //if the last dispatched task was not zero then begin the task scheduling from the
+            //last dispatched task + 1. The last dispatched task was already scheduled
+            if((prev_task > 0) || (run_task == 0))
             {
                 prev_task++;
-                i++;
             }
+            //go through all the tasks for the current priority
             while(prev_task < MAX_TASKS)
             {
-
                 if((tcb[prev_task].currentPriority == prio && (tcb[prev_task].state == STATE_UNRUN || tcb[prev_task].state == STATE_READY)))
                 {
-
+                    //add the last dispatched task in the array
                     last_searched_task[prio] = prev_task;
-
+                    if(prio == 15)
+                    {
+                        run_task = prev_task;
+                    }
                     ok = true;
                     return prev_task;
                 }
                 prev_task++;
-
-                i++;
             }
 
+            // if we go through all the tasks then set the last dispatched task to be 0
+            //increment the priority level
             if(prev_task == MAX_TASKS)
             {
                last_searched_task[prio] = 0;
                prio = prio + 1;
             }
 
-            if(prio == 15) prio = 0;
+            if(prio == 16) prio = 0;
         }
     }
 
@@ -309,6 +317,7 @@ void destroyThread(_fn fn)
 // REQUIRED: modify this function to set a thread priority
 void setThreadPriority(_fn fn, uint8_t priority)
 {
+    __asm(" SVC #17");
 }
 
 int8_t createSemaphore(uint8_t count, char str[])
@@ -331,14 +340,6 @@ void startRtos()
     uint32_t SP = tcb[taskCurrent].spInit;
     setPSP(SP);
 
-    //Timer code
-    //Enable clocks
-    SYSCTL_RCGCTIMER_R |= SYSCTL_RCGCTIMER_R1;
-
-    // Configure Timer 1 as the time base
-    TIMER1_CTL_R &= ~TIMER_CTL_TAEN;                                // turn-off timer before reconfiguring
-    TIMER1_CFG_R = TIMER_CFG_32_BIT_TIMER;                          // configure as 32-bit timer (A+B)
-    TIMER1_TAMR_R = TIMER_TAMR_TAMR_PERIOD | TIMER_TAMR_TACDIR;     // configure for periodic mode (count down)
     TIMER1_CTL_R |= TIMER_CTL_TAEN;                                 // turn-on timer
 
     tcb[taskCurrent].state = STATE_READY;
@@ -400,14 +401,24 @@ void systickIsr()
     uint8_t k = 0;
     if(N == 1000)
     {
+        N = 0;
+        initial_time = 0;
+        final_time = 0;
         while(k < MAX_TASKS)
         {
-          tcb[k].swapBuffer[j] = tcb[k].t1;
+          tcb[k].swapBuffer[j] = tcb[k].task_time;
+          tcb[k].task_time = 0;
           k++;
         }
         j = 1-j;
         total_time_temp = total_time;
         total_time = 0;
+    }
+
+    if (myshell.preempt == 1)
+    {
+        //tcb[taskCurrent].state = STATE_READY;
+        NVIC_INT_CTRL_R = NVIC_INT_CTRL_PEND_SV;
     }
 }
 
@@ -469,15 +480,14 @@ void pendSvIsr()
     __asm("     SUB R0, R0, #4");
     tcb[taskCurrent].sp = getPSP();
 
+    final_time = TIMER1_TAV_R;
     TIMER1_CTL_R &= ~TIMER_CTL_TAEN;       //turn off timer1
-    final_time =TIMER1_TAV_R;
-    TIMER1_TAV_R=0;
-
     time_difference = final_time - initial_time;
     total_time += time_difference;
-    tcb[taskCurrent].t1 = time_difference;
+    tcb[taskCurrent].task_time += time_difference;
 
     taskCurrent = rtosScheduler();
+    TIMER1_TAV_R=0;
     TIMER1_CTL_R |= TIMER_CTL_TAEN;
     initial_time =TIMER1_TAV_R;
 
@@ -575,16 +585,43 @@ void svCallIsr()
             tcb[taskCurrent].semaphore = &semaphores[R0];
             semaphores[R0].processQueue[semaphores[R0].queueSize] = taskCurrent;
             semaphores[R0].queueSize++;
+            semaphores[R0].lastWaitThread = taskCurrent;
+            if(myshell.pi == 1)
+            {
+//                while(numTasks < taskCount)
+//                {
+                    if(tcb[1].pid == tcb[semaphores[R0].lastWaitThread].pid)
+                    {
+                        tcb[1].currentPriority = 15;
+                    }
+                    //numTasks++;
+                //}
+            }
             NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV;
         }
         break;
 
     case 3:
+        tcb[taskCurrent].currentPriority = tcb[taskCurrent].priority;
         semaphores[R0].count++;
         if(semaphores[R0].queueSize > 0)
         {
             tcb[semaphores[R0].processQueue[0]].state = STATE_READY;
+
+//            if(myshell.pi == 1)
+//            {
+////                while(numTasks < taskCount)
+////                {
+//                    if((tcb[1].pid == tcb[semaphores[R0].processQueue[0]].pid) && (tcb[1].currentPriority != tcb[1].priority))
+//                    {
+//                        tcb[1].currentPriority = tcb[1].priority;
+//                    }
+//                    //numTasks++;
+//                //}
+//            }
+
             semaphores[R0].count--;
+
             uint8_t j = 0;
             for(j = 0; j<semaphores[R0].queueSize; j++)
             {
@@ -619,9 +656,31 @@ void svCallIsr()
 
             //Location holder for %CPU
             uint32_t t = tcb[numTasks].swapBuffer[1-j];
-            uint32_t process_time = (t*10000)/total_time_temp;
+            uint32_t process_time = (t*100)/total_time_temp;
+            process_time = process_time * 100;
             IntegerToString(process_time,myshell.str);
-            putsUart0(myshell.str);
+            uint8_t len1 = getLength(myshell.str);
+            uint8_t i = 0;
+            while(i != len1)
+            {
+               putcUart0(myshell.str[i]);
+               if(len1 == 3)
+               {
+                   if(i == 0)
+                   {
+                      putcUart0(46);
+                   }
+               }
+               else
+               {
+                   if(i == 1)
+                   {
+                      putcUart0(46);
+                   }
+               }
+               i++;
+            }
+
             putsUart0("\t\t");
 
             IntegerToString(tcb[numTasks].currentPriority,myshell.str);
@@ -678,9 +737,10 @@ void svCallIsr()
             putsUart0("\t");
 
             int8_t queue_size = semaphores[numTasks].queueSize;
-            for(queue_size = semaphores[numTasks].queueSize; queue_size >= 0 ; queue_size--)
+            uint8_t queue_var = 0;
+            for(queue_var = 0; queue_var < queue_size ; queue_var++)
             {
-                copy(tcb[semaphores[numTasks].processQueue[queue_size]].name,myshell.str);
+                copy(tcb[semaphores[numTasks].processQueue[queue_var]].name,myshell.str);
                 putsUart0(myshell.str);
                 putsUart0("   ");
             }
@@ -750,6 +810,28 @@ void svCallIsr()
     case 13:
         NVIC_APINT_R = NVIC_APINT_VECTKEY | NVIC_APINT_SYSRESETREQ|NVIC_APINT_VECT_RESET;
         break;
+
+    case 14:
+        myshell.mpu_mode = R0;
+        break;
+
+    case 15:
+        break;
+
+    case 16:
+        break;
+
+    case 17:
+        while(numTasks < taskCount)
+        {
+            if(tcb[numTasks].pid == R0)
+            {
+                tcb[numTasks].currentPriority=R1;
+                break;
+            }
+            numTasks++;
+        }
+        break;
     }
 }
 
@@ -798,6 +880,9 @@ void initHw()
     SYSCTL_RCGCGPIO_R |= SYSCTL_RCGCGPIO_R4;
     SYSCTL_RCGCGPIO_R |= SYSCTL_RCGCGPIO_R5;
     SYSCTL_RCGCGPIO_R |= SYSCTL_RCGCGPIO_R0;
+    //Timer code
+    //Enable clocks
+    SYSCTL_RCGCTIMER_R |= SYSCTL_RCGCTIMER_R1;
     _delay_cycles(3);
 
     GPIO_PORTF_DIR_R |= BLUE_LED_MASK;
@@ -812,6 +897,13 @@ void initHw()
     GPIO_PORTA_DEN_R |= PUSH_BUTTON_MASK0 | PUSH_BUTTON_MASK1 | PUSH_BUTTON_MASK2 | PUSH_BUTTON_MASK3 | PUSH_BUTTON_MASK4 | PUSH_BUTTON_MASK5 ;
 
     GPIO_PORTA_PUR_R |= PUSH_BUTTON_MASK0 | PUSH_BUTTON_MASK1 | PUSH_BUTTON_MASK2 | PUSH_BUTTON_MASK3 | PUSH_BUTTON_MASK4 | PUSH_BUTTON_MASK5;
+
+    // Configure Timer 1 as the time base
+    TIMER1_CTL_R &= ~TIMER_CTL_TAEN;                                // turn-off timer before reconfiguring
+    TIMER1_CFG_R = TIMER_CFG_32_BIT_TIMER;                          // configure as 32-bit timer (A+B)
+    TIMER1_TAMR_R = TIMER_TAMR_TAMR_PERIOD | TIMER_TAMR_TACDIR;     // configure for periodic mode (count down)
+    TIMER1_TAV_R = 0x00;
+//    TIMER1_CTL_R |= TIMER_CTL_TAEN;                                 // turn-on timer
 
     initUart0();
     setUart0BaudRate(115200, 40e6);
@@ -1208,6 +1300,11 @@ void reboot()
 {
     __asm(" SVC #13");
 }
+
+void mpu(int8_t val)
+{
+    __asm(" SVC #14");
+}
 // ------------------------------------------------------------------------------
 //  Task functions
 // ------------------------------------------------------------------------------
@@ -1479,6 +1576,19 @@ void shell()
         if(isCommand(&data, "run", 1))
         {
             proc_name(getFieldString(&data,1));
+            valid = true;
+        }
+
+        if(isCommand(&data, "mpu", 1))
+        {
+            if(compare(getFieldString(&data,1),"on"))
+            {
+                mpu(1);
+            }
+            else if(compare(getFieldString(&data,1),"off"))
+            {
+                mpu(0);
+            }
             valid = true;
         }
 
