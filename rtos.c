@@ -49,7 +49,7 @@
 #include "uart0.h"
 #include "wait.h"
 
-// REQUIRED: correct these bitbanding references for the off-board LEDs
+// bitbanding references for the off-board and on-board LEDs
 #define BLUE_LED         (*((volatile uint32_t *)(0x42000000 + (0x400253FC-0x40000000)*32 + 2*4)))
 #define RED_LED          (*((volatile uint32_t *)(0x42000000 + (0x400243FC-0x40000000)*32 + 1*4)))
 #define ORANGE_LED       (*((volatile uint32_t *)(0x42000000 + (0x400243FC-0x40000000)*32 + 2*4)))
@@ -57,6 +57,7 @@
 #define GREEN_LED        (*((volatile uint32_t *)(0x42000000 + (0x400243FC-0x40000000)*32 + 4*4)))
 
 //bitbanding addresses for PUSH BUTTONS
+//all the push buttons are on the port A
 #define PUSH_BUTTON0  (*((volatile uint32_t *)(0x42000000 + (0x400043FC-0x40000000)*32 + 2*4)))
 #define PUSH_BUTTON1  (*((volatile uint32_t *)(0x42000000 + (0x400043FC-0x40000000)*32 + 3*4)))
 #define PUSH_BUTTON2  (*((volatile uint32_t *)(0x42000000 + (0x400043FC-0x40000000)*32 + 4*4)))
@@ -88,6 +89,7 @@
 // function pointer
 typedef void (*_fn)();
 
+//User data for shell commands is processed here.
 #define MAX_CHARS 80
 #define MAX_FIELDS 5
 typedef struct _USER_DATA
@@ -98,16 +100,25 @@ typedef struct _USER_DATA
     char fieldType[MAX_FIELDS];
 }USER_DATA;
 
-//shell
-struct _shell
+//this struct is used by shell thread to print the processes information like task name, pid, cpu percentage, priority and state of the tasks.
+typedef struct _shell_data
 {
-    char str[21];              //name of the pid
-    uint32_t pid;                       //address of the pid
-    int8_t mode;                       //round robin or priority
-    int8_t preempt;                       //preemption on = true and off = false
-    int8_t pi;                            //priority inheritance on or off
-    int8_t mpu_mode;                       //0 - mpu off and 1 - mpu on
-}myshell;
+    char data[12];                    //temporary char array for storing the char characters for printing the char array and copying to the 2d char array.
+    uint16_t tasks_total;             //keeps track of number of tasks
+    char tasks_name[10][10];          //this 2d char array stores the name of the tasks
+    uint32_t pid[10];                 //pid of task is stored here.
+    uint16_t cputime[10];             //cpu of tasks
+    char priority[10][3];             //priority of each task
+    uint8_t state[10];                //state of each task
+    char delay[12][5];                //if any task is delayed, then the number of ms of delay is stored here.
+    char resources[12][11];           //if any task is blocked, then name of the semaphore that is blocking is stored here.
+    uint16_t kerneltime;              //time used by kernel to make multi-threading is stored here.
+    uint8_t semaphores_total;         //number of semaphores
+    char semaphores_names[4][12];     //semaphore names are stored here
+    char semaphores_count[4][4];      //count variable of each semaphore is stored here.
+    char waiting_processes[4][12];    //name of the task that is blocked by the semaphore is stored.
+    uint8_t tempState;
+}shell_data;
 
 // semaphore
 #define MAX_SEMAPHORES 5
@@ -128,22 +139,28 @@ uint8_t semaphoreCount = 0;
 uint8_t keyPressed, keyReleased, flashReq, resource;
 
 // task
-#define STATE_INVALID    0 // no task
-#define STATE_UNRUN      1 // task has never been run
-#define STATE_READY      2 // has run, can resume at any time
-#define STATE_DELAYED    3 // has run, but now awaiting timer
-#define STATE_BLOCKED    4 // has run, but now blocked by semaphore
+#define STATE_INVALID      0 // no task
+#define STATE_UNRUN        1 // task has never been run
+#define STATE_READY        2 // has run, can resume at any time
+#define STATE_DELAYED      3 // has run, but now awaiting timer
+#define STATE_BLOCKED      4 // has run, but now blocked by semaphore
+#define STATE_SUSPENDED    5 // has run, but now killed by user
 
-#define MAX_TASKS 12       // maximum number of valid tasks
-uint8_t taskCurrent = 0;   // index of last dispatched task
-uint8_t taskCount = 0;     // total number of valid tasks
-uint32_t initial_time = 0;
-uint32_t final_time = 0;
-uint32_t time_difference;
-uint32_t total_time = 0;
-uint32_t total_time_temp = 0;
-uint32_t j = 0; //global variable to swap the buffer
-uint32_t N = 0;     //variable to keep track of the Number of times the systick isr is called.
+#define MAX_TASKS 12                // maximum number of valid tasks
+uint8_t taskCurrent = 0;            // index of last dispatched task
+uint8_t taskCount = 0;              // total number of valid tasks
+uint32_t initial_time = 0;          //initial recording of time for the task that is running
+uint32_t final_time = 0;            //final recording of time for the task that was running before the task was switched in pendsv
+uint32_t time_difference;           //time difference of initial time and final time
+uint32_t total_time = 0;            //total time of all the tasks
+uint32_t total_time_temp = 0;       //temporary variable to store the total time taken by all the tasks for the calculation
+uint32_t j = 0;                     //global variable to swap the buffer
+uint32_t N = 0;                     //variable to keep track of the Number of times the systick isr is called.
+int8_t sched_mode;                  //round robin or priority
+int8_t preempt_mode = 0;            //preemption on = true and off = false
+int8_t pi_mode = 0;                 //priority inheritance on or off
+int8_t mpu_mode = 0;                //0 - mpu off and 1 - mpu on
+uint8_t count = 0;
 
 // REQUIRED: add store and management for the memory used by the thread stacks
 //           thread stacks must start on 1 kiB boundaries so mpu can work correctly
@@ -159,14 +176,16 @@ struct _tcb
     uint32_t ticks;                // ticks until sleep complete
     char name[16];                 // name of task used in ps command
     void *semaphore;               // pointer to the semaphore that is blocking the thread
-    uint32_t task_time;
-    uint32_t swapBuffer[2];
+    uint32_t task_time;            //time taken by each task
+    uint32_t swapBuffer[2];        //this buffer stores the previous and current time for the task depending upon the value of j
+    uint32_t permissionmask;       //variable that determines the access of the region of each task in MPU
 } tcb[MAX_TASKS];
 
 //Allocating 28KiB space for the heap in stack...2KiB for the MSP stack and remaining 2KiB for the OS variables/kernel
 #pragma DATA_SECTION(mystack, ".heap")
 uint32_t mystack[7168];
-uint32_t heap = (uint32_t*)mystack ;
+uint32_t heap = (uint32_t*)mystack ;    //pointer to the beginning address of the heap in my stack
+                                        //the beginning address of the heap is 0x20001000
 
 //-----------------------------------------------------------------------------
 // RTOS Kernel Functions
@@ -187,7 +206,8 @@ void initRtos()
 }
 
 // REQUIRED: Implement prioritization to 16 levels
-uint32_t last_searched_task[16];
+uint32_t last_searched_task[16];   //stores the last searched task for each priority. If all the tasks are searched for the current priority, then the beginning index for the last searched task
+                                    //starts from the index 0 for the current priority
 uint16_t prio = 0;
 uint8_t run_task = 16;
 int rtosScheduler()
@@ -195,7 +215,7 @@ int rtosScheduler()
     bool ok;
     ok = false;
     //Round Robin Scheduler
-    if(myshell.mode == 1)
+    if(sched_mode == 1)
     {
         bool ok;
         static uint8_t task = 0xFF;
@@ -211,7 +231,7 @@ int rtosScheduler()
     }
 
     //default is priority scheduling
-    else if(myshell.mode == 0)
+    else if(sched_mode == 0)
     {
         while (!ok)
         {
@@ -282,17 +302,7 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
             tcb[i].priority = priority;
             tcb[i].currentPriority = priority;
             copy(name,tcb[i].name);
-//            char str[100];
-//            putsUart0(tcb[i].name);
-//            putsUart0("\r\n");
-//            sprintf(str,"%p\r\n", tcb[i].pid);
-//            putsUart0(str);
-//            sprintf(str,"%d\r\n", tcb[i].priority);
-//            putsUart0(str);
-//            sprintf(str,"%p\r\n", tcb[i].spInit);
-//            putsUart0(str);
-//            sprintf(str,"%p\r\n", tcb[i].sp);
-//            putsUart0(str);
+            tcb[i].permissionmask = 1<<i;
             // increment task count
             taskCount++;
             ok = true;
@@ -305,6 +315,7 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
 // REQUIRED: modify this function to restart a thread
 void restartThread(_fn fn)
 {
+    __asm(" SVC #15");
 }
 
 // REQUIRED: modify this function to destroy a thread
@@ -312,6 +323,7 @@ void restartThread(_fn fn)
 // NOTE: see notes in class for strategies on whether stack is freed or not
 void destroyThread(_fn fn)
 {
+    __asm(" SVC #16");
 }
 
 // REQUIRED: modify this function to set a thread priority
@@ -344,9 +356,152 @@ void startRtos()
 
     tcb[taskCurrent].state = STATE_READY;
     setASP();
+    usermode();
     _fn fn = tcb[taskCurrent].pid;
     fn();
 
+    //Initializing MPU Control register. It is disabled at first.
+      NVIC_MPU_CTRL_R |= 0x00000000;
+
+    //Enabling MPU Region for RAM, peripherals, and bitbanded addresses
+      NVIC_MPU_NUMBER_R = 0x0;
+    //Configuring base register
+      NVIC_MPU_BASE_R |= 0x00000000;          //base address of the RAM, peripherals and bitbanded region.
+      NVIC_MPU_BASE_R |= 0x00000000;          //disabling valid region number
+      NVIC_MPU_BASE_R |= 0x0;                 //Region rule is 0.
+    // Configuration of Attribute Register
+      NVIC_MPU_ATTR_R |= 0x10000000;          // Instruction fetches are disabled.
+      NVIC_MPU_ATTR_R |= 0x03000000;          // Full Access Mode
+      NVIC_MPU_ATTR_R |= 0x00000000;          // Setting TEX field for Flash
+      NVIC_MPU_ATTR_R |= 0x00040000;          // Shareable
+      NVIC_MPU_ATTR_R |= 0x00000000;          // Not Cacheable
+      NVIC_MPU_ATTR_R |= 0x00000000;          // Not Bufferable
+      NVIC_MPU_ATTR_R |= 0x00000000;          // Sub region is enabled.
+      NVIC_MPU_ATTR_R |= 0x0000003E;          // Region Size Mask for RAM, peripheral and bitbanded (Size = log2(4*1024*1024*1024)-1 )
+      NVIC_MPU_ATTR_R |= 0x01;                // Region Enabled
+
+
+      //Enabling MPU Region for 256 KiB flash
+      NVIC_MPU_NUMBER_R = 0x1;
+      //Configuring base register
+      NVIC_MPU_BASE_R |= 0x00000000;      //base address of the Flash region.
+      NVIC_MPU_BASE_R |= 0x00000000;      //disabling valid region number
+      NVIC_MPU_BASE_R |= 0x1;             //Region rule is 1.
+      //Configuration of Attribute Register
+      NVIC_MPU_ATTR_R |= 0x00000000;      // Instruction fetches are enabled.
+      NVIC_MPU_ATTR_R |= 0x03000000;      // Full Access Mode
+      NVIC_MPU_ATTR_R |= 0x00000000;      // Setting TEX field for Flash
+      NVIC_MPU_ATTR_R |= 0x00000000;      // Not Shareable
+      NVIC_MPU_ATTR_R |= 0x00020000;      // Cacheable
+      NVIC_MPU_ATTR_R |= 0x00000000;      // Not Bufferable
+      NVIC_MPU_ATTR_R |= 0x00000000;
+      NVIC_MPU_ATTR_R |= 0x00000022;      // Region Size Mask for flash (Size = log2(256*1024)-1 = 17)
+      NVIC_MPU_ATTR_R |= 0x01;            // Region Enabled
+
+
+     //Enabling mutliple MPU Regions for 32 KiB RAM
+     // NVIC_MPU_NUMBER_R &= 0x0;
+      NVIC_MPU_NUMBER_R = 0x2;
+     //Configuring base register
+      NVIC_MPU_BASE_R |= 0x20000000;      //base address of the region.
+      NVIC_MPU_BASE_R |= 0x00000000;      //disabling valid region number
+      NVIC_MPU_BASE_R |= 0x2;             //Region rule is 2.
+     // Configuration of Attribute Register
+      NVIC_MPU_ATTR_R |= 0x10000000;      // Instruction fetches are disabled.
+      NVIC_MPU_ATTR_R |= 0x01000000;      // RW - Priv / No RW for UnPriv Mode
+      NVIC_MPU_ATTR_R |= 0x00000000;      // Setting TEX field for RAM
+      NVIC_MPU_ATTR_R |= 0x00040000;      // Shareable
+      NVIC_MPU_ATTR_R |= 0x00020000;      // Cacheable
+      NVIC_MPU_ATTR_R |= 0x00000000;      // Not Bufferable
+      if(taskCurrent < 8)
+      {
+        NVIC_MPU_ATTR_R = tcb[taskCurrent].permissionmask << 8;
+      }
+      else if(taskCurrent >= 8)
+      {
+        NVIC_MPU_ATTR_R = 0x00000000;
+      }
+      NVIC_MPU_ATTR_R |= (12 << 1);      // Region Size Mask for 8KiB
+      NVIC_MPU_ATTR_R |= 0x01;            // Region Enabled
+
+
+      NVIC_MPU_NUMBER_R = 0x3;
+     //Configuring base register
+      NVIC_MPU_BASE_R |= 0x20002000;      //base address of the MPU region.
+      NVIC_MPU_BASE_R |= 0x00000000;      //disabling valid region number
+      NVIC_MPU_BASE_R |= 0x3;             //Region rule is 3.
+     // Configuration of Attribute Register
+      NVIC_MPU_ATTR_R |= 0x10000000;      // Instruction fetches are disabled.
+      NVIC_MPU_ATTR_R |= 0x01000000;      // RW - Priv / No RW for UnPriv Mode
+      NVIC_MPU_ATTR_R |= 0x00000000;      // Setting TEX field for RAM
+      NVIC_MPU_ATTR_R |= 0x00040000;      // Shareable
+      NVIC_MPU_ATTR_R |= 0x00020000;      // Cacheable
+      NVIC_MPU_ATTR_R |= 0x00000000;      // Not Bufferable
+      if(taskCurrent > 7 && taskCurrent < 16)
+      {
+        NVIC_MPU_ATTR_R = tcb[taskCurrent].permissionmask << 8;
+      }
+      else
+      {
+        NVIC_MPU_ATTR_R = 0x00000000;
+      }
+      NVIC_MPU_ATTR_R |= (12 << 1);      // Region Size Mask for 8KiB
+      NVIC_MPU_ATTR_R |= 0x01;            // Region Enabled
+
+
+      NVIC_MPU_NUMBER_R = 0x4;
+      //Configuring base register
+      NVIC_MPU_BASE_R |= 0x20004000;      //base address of the MPU region.
+      NVIC_MPU_BASE_R |= 0x00000000;      //disabling valid region number
+      NVIC_MPU_BASE_R |= 0x4;             //Region rule is 4.
+      // Configuration of Attribute Register
+      NVIC_MPU_ATTR_R |= 0x10000000;      // Instruction fetches are disabled.
+      NVIC_MPU_ATTR_R |= 0x01000000;      // RW - Priv / No RW for UnPriv Mode
+      NVIC_MPU_ATTR_R |= 0x00000000;      // Setting TEX field for RAM
+      NVIC_MPU_ATTR_R |= 0x00040000;      // Shareable
+      NVIC_MPU_ATTR_R |= 0x00020000;      // Cacheable
+      NVIC_MPU_ATTR_R |= 0x00000000;      // Not Bufferable
+      if(taskCurrent > 15 && taskCurrent < 24)
+      {
+        NVIC_MPU_ATTR_R = tcb[taskCurrent].permissionmask << 8;
+      }
+      else
+      {
+        NVIC_MPU_ATTR_R = 0x00000000;
+      }
+      NVIC_MPU_ATTR_R |= (12 << 1);      // Region Size Mask for 8KiB
+      NVIC_MPU_ATTR_R |= 0x01;            // Region Enabled
+
+
+      NVIC_MPU_NUMBER_R = 0x5;
+     //Configuring base register
+      NVIC_MPU_BASE_R |= 0x20006000;      //base address of the MPU region.
+      NVIC_MPU_BASE_R |= 0x00000000;      //disabling valid region number
+      NVIC_MPU_BASE_R |= 0x5;             //Region rule is 5.
+     // Configuration of Attribute Register
+      NVIC_MPU_ATTR_R |= 0x10000000;      // Instruction fetches are disabled.
+      NVIC_MPU_ATTR_R |= 0x01000000;      // RW - Priv / No RW for UnPriv Mode
+      NVIC_MPU_ATTR_R |= 0x00000000;      // Setting TEX field for RAM
+      NVIC_MPU_ATTR_R |= 0x00040000;      // Shareable
+      NVIC_MPU_ATTR_R |= 0x00020000;      // Cacheable
+      NVIC_MPU_ATTR_R |= 0x00000000;      // Not Bufferable
+      if(taskCurrent > 23 && taskCurrent < 32)
+      {
+        NVIC_MPU_ATTR_R = tcb[taskCurrent].permissionmask << 8;
+      }
+      else
+      {
+        NVIC_MPU_ATTR_R = 0x00000000;
+      }
+      NVIC_MPU_ATTR_R |= (12 << 1);      // Region Size Mask for 8KiB
+      NVIC_MPU_ATTR_R |= 0x01;            // Region Enabled
+
+      //if(myshell.mpu_mode == 1)
+      NVIC_MPU_CTRL_R |= 0x00000004 | 0x00000002 | 0x00000001;        // MPU Default Region | MPU Enabled During Faults | MPU enable
+
+      NVIC_SYS_HND_CTRL_R |= 0x00040000; //Enabling usage fault
+      NVIC_SYS_HND_CTRL_R |= 0x00020000; //Enabling bus fault
+      NVIC_SYS_HND_CTRL_R |= 0x00010000; //Enabling memory management fault
 }
 
 // REQUIRED: modify this function to yield execution back to scheduler using pendsv
@@ -415,7 +570,7 @@ void systickIsr()
         total_time = 0;
     }
 
-    if (myshell.preempt == 1)
+    if (preempt_mode == 1)
     {
         //tcb[taskCurrent].state = STATE_READY;
         NVIC_INT_CTRL_R = NVIC_INT_CTRL_PEND_SV;
@@ -426,40 +581,6 @@ void systickIsr()
 // REQUIRED: process UNRUN and READY tasks differently
 void pendSvIsr()
 {
-    //debugging code
-    //BLUE_LED = 1;
-    //step 6 code and discard
-//    __asm("     MRS R0, PSP");
-//    __asm("     STR R4, [R0, #-4]");
-//    __asm("     SUB R0, R0, #4");
-//    __asm("     STR R5, [R0, #-4]");
-//    __asm("     SUB R0, R0, #4");
-//    __asm("     STR R6, [R0, #-4]");
-//    __asm("     SUB R0, R0, #4");
-//    __asm("     STR R7, [R0, #-4]");
-//    __asm("     SUB R0, R0, #4");
-//    __asm("     STR R8, [R0, #-4]");
-//    __asm("     SUB R0, R0, #4");
-//    __asm("     STR R9, [R0, #-4]");
-//    __asm("     SUB R0, R0, #4");
-//    __asm("     STR R10, [R0, #-4]");
-//    __asm("     SUB R0, R0, #4");
-//    __asm("     STR R11, [R0, #-4]");
-//    __asm("     SUB R0, R0, #4");
-//    tcb[taskCurrent].sp = getPSP();
-//    taskCurrent = rtosScheduler();
-//    setPSP(tcb[taskCurrent].sp);
-//    __asm("     MRS R0, PSP");
-//    __asm("     LDR R4, [R0, #-4], #-4");
-//    __asm("     LDR R5, [R0, #-4], #-4");
-//    __asm("     LDR R6, [R0, #-4], #-4");
-//    __asm("     LDR R7, [R0, #-4], #-4");
-//    __asm("     LDR R8, [R0, #-4], #-4");
-//    __asm("     LDR R9, [R0, #-4], #-4");
-//    __asm("     LDR R10, [R0, #-4], #-4");
-//    __asm("     LDR R11, [R0, #-4], #-4");
-
-
     //step 7
     __asm("     MRS R0, PSP");
     __asm("     STR R4, [R0, #-4]");
@@ -487,6 +608,104 @@ void pendSvIsr()
     tcb[taskCurrent].task_time += time_difference;
 
     taskCurrent = rtosScheduler();
+
+    //Enabling mutliple MPU Regions for 32 KiB RAM
+    // NVIC_MPU_NUMBER_R &= 0x0;
+     NVIC_MPU_NUMBER_R = 0x2;
+    //Configuring base register
+     NVIC_MPU_BASE_R |= 0x20000000;      //base address of the region.
+     NVIC_MPU_BASE_R |= 0x00000000;      //disabling valid region number
+     NVIC_MPU_BASE_R |= 0x2;             //Region rule is 2.
+    // Configuration of Attribute Register
+     NVIC_MPU_ATTR_R |= 0x10000000;      // Instruction fetches are disabled.
+     NVIC_MPU_ATTR_R |= 0x01000000;      // RW - Priv / No RW for UnPriv Mode
+     NVIC_MPU_ATTR_R |= 0x00000000;      // Setting TEX field for RAM
+     NVIC_MPU_ATTR_R |= 0x00040000;      // Shareable
+     NVIC_MPU_ATTR_R |= 0x00020000;      // Cacheable
+     NVIC_MPU_ATTR_R |= 0x00000000;      // Not Bufferable
+     if(taskCurrent < 8)
+     {
+       NVIC_MPU_ATTR_R = tcb[taskCurrent].permissionmask << 8;
+     }
+     else if(taskCurrent >= 8)
+     {
+       NVIC_MPU_ATTR_R = 0x00000000;
+     }
+     NVIC_MPU_ATTR_R |= (12 << 1);      // Region Size Mask for 8KiB
+     NVIC_MPU_ATTR_R |= 0x01;            // Region Enabled
+
+
+     NVIC_MPU_NUMBER_R = 0x3;
+    //Configuring base register
+     NVIC_MPU_BASE_R |= 0x20002000;      //base address of the MPU region.
+     NVIC_MPU_BASE_R |= 0x00000000;      //disabling valid region number
+     NVIC_MPU_BASE_R |= 0x3;             //Region rule is 3.
+    // Configuration of Attribute Register
+     NVIC_MPU_ATTR_R |= 0x10000000;      // Instruction fetches are disabled.
+     NVIC_MPU_ATTR_R |= 0x01000000;      // RW - Priv / No RW for UnPriv Mode
+     NVIC_MPU_ATTR_R |= 0x00000000;      // Setting TEX field for RAM
+     NVIC_MPU_ATTR_R |= 0x00040000;      // Shareable
+     NVIC_MPU_ATTR_R |= 0x00020000;      // Cacheable
+     NVIC_MPU_ATTR_R |= 0x00000000;      // Not Bufferable
+     if(taskCurrent > 7 && taskCurrent < 16)
+     {
+       NVIC_MPU_ATTR_R = tcb[taskCurrent].permissionmask << 8;
+     }
+     else
+     {
+       NVIC_MPU_ATTR_R = 0x00000000;
+     }
+     NVIC_MPU_ATTR_R |= (12 << 1);      // Region Size Mask for 8KiB
+     NVIC_MPU_ATTR_R |= 0x01;            // Region Enabled
+
+
+     NVIC_MPU_NUMBER_R = 0x4;
+     //Configuring base register
+     NVIC_MPU_BASE_R |= 0x20004000;      //base address of the MPU region.
+     NVIC_MPU_BASE_R |= 0x00000000;      //disabling valid region number
+     NVIC_MPU_BASE_R |= 0x4;             //Region rule is 4.
+     // Configuration of Attribute Register
+     NVIC_MPU_ATTR_R |= 0x10000000;      // Instruction fetches are disabled.
+     NVIC_MPU_ATTR_R |= 0x01000000;      // RW - Priv / No RW for UnPriv Mode
+     NVIC_MPU_ATTR_R |= 0x00000000;      // Setting TEX field for RAM
+     NVIC_MPU_ATTR_R |= 0x00040000;      // Shareable
+     NVIC_MPU_ATTR_R |= 0x00020000;      // Cacheable
+     NVIC_MPU_ATTR_R |= 0x00000000;      // Not Bufferable
+     if(taskCurrent > 15 && taskCurrent < 24)
+     {
+       NVIC_MPU_ATTR_R = tcb[taskCurrent].permissionmask << 8;
+     }
+     else
+     {
+       NVIC_MPU_ATTR_R = 0x00000000;
+     }
+     NVIC_MPU_ATTR_R |= (12 << 1);      // Region Size Mask for 8KiB
+     NVIC_MPU_ATTR_R |= 0x01;            // Region Enabled
+
+
+     NVIC_MPU_NUMBER_R = 0x5;
+    //Configuring base register
+     NVIC_MPU_BASE_R |= 0x20006000;      //base address of the MPU region.
+     NVIC_MPU_BASE_R |= 0x00000000;      //disabling valid region number
+     NVIC_MPU_BASE_R |= 0x5;             //Region rule is 5.
+    // Configuration of Attribute Register
+     NVIC_MPU_ATTR_R |= 0x10000000;      // Instruction fetches are disabled.
+     NVIC_MPU_ATTR_R |= 0x01000000;      // RW - Priv / No RW for UnPriv Mode
+     NVIC_MPU_ATTR_R |= 0x00000000;      // Setting TEX field for RAM
+     NVIC_MPU_ATTR_R |= 0x00040000;      // Shareable
+     NVIC_MPU_ATTR_R |= 0x00020000;      // Cacheable
+     NVIC_MPU_ATTR_R |= 0x00000000;      // Not Bufferable
+     if(taskCurrent > 23 && taskCurrent < 32)
+     {
+       NVIC_MPU_ATTR_R = tcb[taskCurrent].permissionmask << 8;
+     }
+     else
+     {
+       NVIC_MPU_ATTR_R = 0x00000000;
+     }
+     NVIC_MPU_ATTR_R |= (12 << 1);      // Region Size Mask for 8KiB
+     NVIC_MPU_ATTR_R |= 0x01;            // Region Enabled
+
     TIMER1_TAV_R=0;
     TIMER1_CTL_R |= TIMER_CTL_TAEN;
     initial_time =TIMER1_TAV_R;
@@ -519,25 +738,6 @@ void pendSvIsr()
         *(PSP + 6) = fn;
         *(PSP + 7) = 0x61000000;
 
-        //code and discard part below
-        //char str[100];
-//        sprintf(str,"%p\r\n", PSP);
-//        putsUart0(str);
-//        sprintf(str,"%p\r\n", (PSP + 1));
-//        putsUart0(str);
-//        sprintf(str,"%p\r\n", (PSP + 2));
-//        putsUart0(str);
-//        sprintf(str,"%p\r\n", (PSP + 3));
-//        putsUart0(str);
-//        sprintf(str,"%p\r\n",(PSP + 4));
-//        putsUart0(str);
-//        sprintf(str,"%p\r\n", (PSP + 5));
-//        putsUart0(str);
-//        sprintf(str,"%p\r\n", (PSP + 6));
-//        putsUart0(str);
-//        sprintf(str,"%p\r\n", (PSP + 7));
-//        putsUart0(str);
-
     }
 }
 
@@ -555,304 +755,561 @@ void svCallIsr()
     LR = *(PSP+5);
     PC = *(PSP+6);
     xPSR = *(PSP+7);
-    uint8_t n = getSVCNumber();
+    uint32_t n = getSVCNumber();
     uint8_t numTasks = 0;
     semaphore *temp_semaphore;
+    shell_data *temp_shell;
     char *pid_name = (char*)R0;
-
+    temp_shell = R0;
+    uint32_t process_time = 0;
 
     switch(n)
     {
-    case 0:
-        NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV ; //turning on the pendSV exception .... debugging code to verify
-        break;
-
-    case 1:
-        tcb[taskCurrent].ticks = R0;
-        tcb[taskCurrent].state = STATE_DELAYED;
-        NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV ;
-        NVIC_ST_RELOAD_R = 39999;
-        //NVIC_ST_CURRENT_R = 0;
-        NVIC_ST_CTRL_R |= 0x7; //Enabling clk_src(system clock), inten and enable bit
-        break;
-
-    case 2:
-        if(semaphores[R0].count > 0){
-            semaphores[R0].count--;
-        }
-        else{
-            tcb[taskCurrent].state = STATE_BLOCKED;
-            tcb[taskCurrent].semaphore = &semaphores[R0];
-            semaphores[R0].processQueue[semaphores[R0].queueSize] = taskCurrent;
-            semaphores[R0].queueSize++;
-            semaphores[R0].lastWaitThread = taskCurrent;
-            if(myshell.pi == 1)
-            {
-//                while(numTasks < taskCount)
-//                {
-                    if(tcb[1].pid == tcb[semaphores[R0].lastWaitThread].pid)
-                    {
-                        tcb[1].currentPriority = 15;
-                    }
-                    //numTasks++;
-                //}
-            }
-            NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV;
-        }
-        break;
-
-    case 3:
-        tcb[taskCurrent].currentPriority = tcb[taskCurrent].priority;
-        semaphores[R0].count++;
-        if(semaphores[R0].queueSize > 0)
+        case 0:
         {
-            tcb[semaphores[R0].processQueue[0]].state = STATE_READY;
-
-//            if(myshell.pi == 1)
-//            {
-////                while(numTasks < taskCount)
-////                {
-//                    if((tcb[1].pid == tcb[semaphores[R0].processQueue[0]].pid) && (tcb[1].currentPriority != tcb[1].priority))
-//                    {
-//                        tcb[1].currentPriority = tcb[1].priority;
-//                    }
-//                    //numTasks++;
-//                //}
-//            }
-
-            semaphores[R0].count--;
-
-            uint8_t j = 0;
-            for(j = 0; j<semaphores[R0].queueSize; j++)
-            {
-                semaphores[R0].processQueue[j] = semaphores[R0].processQueue[j+1];
-            }
-            semaphores[R0].queueSize--;
+            NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV ; //turning on the pendSV exception .... debugging code to verify
+            break;
         }
-//        if(tcb[semaphores[R0].processQueue[0]].currentPriority < tcb[taskCurrent].priority){
-//            NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV;
-//         }
-        break;
-
-    case 5:
-        putsUart0("Name\t\t PID\t\t%CPU\t\tPriority\t\tState\r\n");
-        while(numTasks < taskCount)
+        case 1:
         {
-            copy(tcb[numTasks].name, myshell.str);
-            putsUart0(myshell.str);
-            uint16_t len = getLength(myshell.str);
-            if( len <= 7)
-            {
-                putsUart0("\t\t");
-            }
-            else
-            {
-                putsUart0("\t");
-            }
-
-            uint16_t val = tcb[numTasks].pid;
-            uint32_tToHex(val);
-            putsUart0("\t\t");
-
-            //Location holder for %CPU
-            uint32_t t = tcb[numTasks].swapBuffer[1-j];
-            uint32_t process_time = (t*100)/total_time_temp;
-            process_time = process_time * 100;
-            IntegerToString(process_time,myshell.str);
-            uint8_t len1 = getLength(myshell.str);
-            uint8_t i = 0;
-            while(i != len1)
-            {
-               putcUart0(myshell.str[i]);
-               if(len1 == 3)
-               {
-                   if(i == 0)
-                   {
-                      putcUart0(46);
-                   }
-               }
-               else
-               {
-                   if(i == 1)
-                   {
-                      putcUart0(46);
-                   }
-               }
-               i++;
-            }
-
-            putsUart0("\t\t");
-
-            IntegerToString(tcb[numTasks].currentPriority,myshell.str);
-            putsUart0(myshell.str);
-            putsUart0("\t\t");
-
-            uint8_t tempState = tcb[numTasks].state;
-            if(tempState == 0)
-            {
-                putsUart0("INVALID");
-            }
-            if(tempState == 1)
-            {
-                putsUart0("UNRUN");
-            }
-            if(tempState == 2)
-            {
-                putsUart0("READY");
-            }
-            if(tempState == 3)
-            {
-                putsUart0("DELAYED FOR ");
-                IntegerToString(tcb[numTasks].ticks,myshell.str);
-                putsUart0(myshell.str);
-                putsUart0("ms");
-            }
-            if(tempState == 4)
-            {
-                putsUart0("BLOCKED BY ");
-                temp_semaphore = tcb[numTasks].semaphore;
-                copy(temp_semaphore->name,myshell.str);
-                putsUart0(myshell.str);
-
-            }
-            putsUart0("\t");
-
-            numTasks++;
-            putsUart0("\r\n");
-
+            tcb[taskCurrent].ticks = R0;
+            tcb[taskCurrent].state = STATE_DELAYED;
+            NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV ;
+            NVIC_ST_RELOAD_R = 39999;
+            //NVIC_ST_CURRENT_R = 0;
+            NVIC_ST_CTRL_R |= 0x7; //Enabling clk_src(system clock), inten and enable bit
+            break;
         }
 
-        break;
-
-    case 6:
-        putsUart0("Name\t\tCount\tWaiting Threads\r\n");
-        while(numTasks < semaphoreCount)
+        case 2:
         {
-            copy(semaphores[numTasks].name,myshell.str);
-            putsUart0(myshell.str);
-            putsUart0("\t");
-
-            IntegerToString(semaphores[numTasks].count,myshell.str);
-            putsUart0(myshell.str);
-            putsUart0("\t");
-
-            int8_t queue_size = semaphores[numTasks].queueSize;
-            uint8_t queue_var = 0;
-            for(queue_var = 0; queue_var < queue_size ; queue_var++)
+            if(semaphores[R0].count > 0)
             {
-                copy(tcb[semaphores[numTasks].processQueue[queue_var]].name,myshell.str);
-                putsUart0(myshell.str);
-                putsUart0("   ");
-            }
-
-            numTasks++;
-            putsUart0("\r\n");
-        }
-        break;
-
-    case 7:
-        numTasks = 1;
-        if((uint32_t)tcb[0].pid == R0)
-        {
-           putsUart0("Cannot kill the Idle process.\r\n");
-        }
-        while((numTasks) < taskCount)
-        {
-           if((uint32_t)tcb[numTasks].pid == R0)
-           {
-                tcb[numTasks].state = STATE_INVALID;
-           }
-            numTasks++;
-        }
-
-        break;
-    case 8:
-        myshell.pi = R0;
-        break;
-    case 9:
-        myshell.preempt = R0;
-        break;
-    case 10:
-        myshell.mode = R0;
-        break;
-
-    case 11:
-
-        while(numTasks < taskCount)
-        {
-            if(compare(tcb[numTasks].name,pid_name))
-            {
-
-                uint16_t val = tcb[numTasks].pid;
-                uint32_tToHex(val);
-                putsUart0("\r\n");
-            }
-            numTasks++;
-        }
-
-        break;
-
-    case 12:
-        while(numTasks < taskCount)
-        {
-            if(compare(tcb[numTasks].name,pid_name))
-            {
-                if(tcb[numTasks].state != STATE_READY)
+                semaphores[R0].count--;
+                if(R0==3)
                 {
-                    tcb[numTasks].state = STATE_READY;
+                    semaphores[R0].lastWaitThread = taskCurrent;
                 }
+                //semaphores[R0].lastWaitThread = taskCurrent;   //last task that used semaphore
             }
-            numTasks++;
+            else{
+                tcb[taskCurrent].state = STATE_BLOCKED;
+                tcb[taskCurrent].semaphore = &semaphores[R0];
+                semaphores[R0].processQueue[semaphores[R0].queueSize] = taskCurrent;
+                semaphores[R0].queueSize++;
+//            if(pi_mode == 0)
+//            {
+//                if(semaphores[R0].lastWaitThread == 6 && taskCurrent == 6)
+//                {
+//                    tcb[1].currentPriority = 0;
+//                }
+//            }
+//            if(pi_mode == 0 && R0 == 3)
+//            {
+//                if(tcb[semaphores[R0].lastWaitThread].priority < tcb[taskCurrent].priority)
+//                {
+//                    tcb[semaphores[R0].lastWaitThread].currentPriority = tcb[taskCurrent].priority;
+//                }
+//            }
+                if(pi_mode == 1)
+                {
+                    while(numTasks < taskCount)
+                    {
+                        if(tcb[numTasks].semaphore == &semaphores[R0])
+                        {
+                            if(tcb[semaphores[R0].processQueue[0]].priority< tcb[numTasks].priority)
+                            {
+                                tcb[numTasks].currentPriority = tcb[semaphores[R0].processQueue[0]].priority;
+                                break;
+                            }
+                        }
+                        numTasks++;
+                    }
+                }
+
+
+                NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV;
+            }
+            break;
         }
 
-        break;
 
-    case 13:
-        NVIC_APINT_R = NVIC_APINT_VECTKEY | NVIC_APINT_SYSRESETREQ|NVIC_APINT_VECT_RESET;
-        break;
-
-    case 14:
-        myshell.mpu_mode = R0;
-        break;
-
-    case 15:
-        break;
-
-    case 16:
-        break;
-
-    case 17:
-        while(numTasks < taskCount)
+        case 3:
         {
-            if(tcb[numTasks].pid == R0)
+            semaphores[R0].count++;
+            if(tcb[taskCurrent].currentPriority != tcb[taskCurrent].priority)
             {
-                tcb[numTasks].currentPriority=R1;
-                break;
+                tcb[taskCurrent].currentPriority = tcb[taskCurrent].priority;
             }
-            numTasks++;
+            if(semaphores[R0].queueSize > 0)
+            {
+                tcb[semaphores[R0].processQueue[0]].state = STATE_READY;
+                semaphores[R0].count--;
+//            if(taskCurrent == 1 && pi_mode == 0)
+//            {
+//               tcb[1].currentPriority = tcb[1].priority;
+//            }
+                uint8_t j = 0;
+                for(j = 0; j<semaphores[R0].queueSize; j++)
+                {
+                    semaphores[R0].processQueue[j] = semaphores[R0].processQueue[j+1];
+                }
+                semaphores[R0].queueSize--;
+
+            }
+            break;
         }
-        break;
+
+        case 5:
+        {
+            temp_shell->tasks_total = taskCount;
+
+            while(numTasks < taskCount)
+            {
+                copy(tcb[numTasks].name, temp_shell->tasks_name[numTasks]);
+                temp_shell->tasks_name[numTasks][getLength(temp_shell->tasks_name[numTasks])] = '\0';
+                //copy(temp_shell->data, temp_shell->tasks_name[numTasks]);
+
+                temp_shell->pid[numTasks] = tcb[numTasks].pid;
+
+                uint32_t t = tcb[numTasks].swapBuffer[1-j];
+                //uint32_t process_time = (t*100)/total_time_temp;
+                process_time = (t/4000);
+                //IntegerToString(process_time,temp_shell->data);
+                //copy(temp_shell->data, temp_shell->cputime[numTasks]);
+                temp_shell->cputime[numTasks] = process_time;
+                IntegerToString(tcb[numTasks].currentPriority,temp_shell->data);
+                copy(temp_shell->data, temp_shell->priority[numTasks]);
+//            //putsUart0(temp_shell->data);
+//            //putsUart0("\t\t");
+//
+                uint8_t tempState = tcb[numTasks].state;
+                temp_shell->state[numTasks] = tempState;
+////            if(tempState == 0)
+////            {
+////                putsUart0("INVALID");
+////            }
+////            if(tempState == 1)
+////            {
+////                putsUart0("UNRUN");
+////            }
+////            if(tempState == 2)
+////            {
+////                putsUart0("READY");
+////            }
+                if(tempState == 3)
+                {
+                //putsUart0("DELAYED FOR ");
+                    IntegerToString(tcb[numTasks].ticks,temp_shell->data);
+                    copy(temp_shell->data,temp_shell->delay[numTasks]);
+                //putsUart0(temp_shell->data);
+                //putsUart0("ms");
+                }
+                if(tempState == 4)
+                {
+                //putsUart0("BLOCKED BY ");
+                    temp_semaphore = tcb[numTasks].semaphore;
+                //copy(temp_semaphore->name,temp_shell->data);
+                    copy(temp_semaphore->name,temp_shell->resources[numTasks]);
+                    temp_shell->resources[numTasks][10] = '\0';
+                //putsUart0(temp_shell->data);
+
+                }
+////            if(tempState == 5)
+////            {
+////                putsUart0("SUSPENDED");
+////
+////            }
+////            putsUart0("\t");
+//
+                numTasks++;
+//            //putsUart0("\r\n");
+//
+            }
+        //putsUart0("Kernel Time:        ");
+            uint32_t kernel_time = (40000000 - total_time_temp);
+            kernel_time = kernel_time/4000;
+            //IntegerToString(kernel_time,temp_shell->data);
+            //copy(temp_shell->data, temp_shell->kerneltime);
+            temp_shell->kerneltime = kernel_time;
+            break;
+
+        }
+
+        case 6:
+        {
+            temp_shell->semaphores_total = semaphoreCount;
+               while(numTasks < semaphoreCount)
+               {
+                   copy(semaphores[numTasks].name,temp_shell->semaphores_names[numTasks]);
+
+                   IntegerToString(semaphores[numTasks].count,temp_shell->data);
+                   copy(temp_shell->data,temp_shell->semaphores_count[numTasks]);
+
+                   int8_t queue_size = semaphores[numTasks].queueSize;
+                   uint8_t queue_var = 0;
+                   for(queue_var = 0; queue_var < queue_size ; queue_var++)
+                   {
+                       copy(tcb[semaphores[numTasks].processQueue[queue_var]].name,temp_shell->waiting_processes[numTasks]);
+                   }
+                   numTasks++;
+               }
+               break;
+        }
+
+        case 7:
+        {
+            numTasks = 1;
+               if((uint32_t)tcb[0].pid == R0)
+               {
+                  putsUart0("Cannot kill the Idle process.\r\n");
+               }
+               while(numTasks < taskCount)
+               {
+                  if((uint32_t)tcb[numTasks].pid == R0)
+                  {
+                      temp_semaphore = tcb[numTasks].semaphore;
+                      int8_t queue_size = temp_semaphore->queueSize;
+                      uint8_t queue_var = 0;
+                      if(tcb[numTasks].state == STATE_BLOCKED)
+                      {
+                          temp_semaphore->queueSize = 0;
+       //                   for(queue_var = 0; queue_var < queue_size ; queue_var++)
+       //                   {
+       //                      if(temp_semaphore->processQueue[queue_var] == numTasks)
+       //                      {
+       //                          temp_semaphore->processQueue[queue_var] = 0;
+       //                          temp_semaphore->queueSize--;
+       //                      }
+       //                      temp_semaphore->processQueue[queue_var] = temp_semaphore->processQueue[queue_var+1];
+       //                   }
+
+                      }
+                      else if(tcb[numTasks].state == STATE_READY || tcb[numTasks].state == STATE_DELAYED)
+                      {
+                          if(tcb[numTasks].semaphore != 0)
+                          {
+                             //tcb[numTasks].semaphore = 0;
+                             tcb[numTasks].currentPriority = tcb[numTasks].priority;
+                             temp_semaphore->count++;
+                             if(queue_size>0)
+                             {
+                                 tcb[temp_semaphore->processQueue[0]].state = STATE_READY;
+                                 temp_semaphore->count--;
+                                 tcb[temp_semaphore->processQueue[0]].semaphore = temp_semaphore;
+                                 for(queue_var = 0; queue_var < queue_size ; queue_var++)
+                                 {
+                                    temp_semaphore->processQueue[queue_var] = temp_semaphore->processQueue[queue_var+1];
+                                 }
+                                 temp_semaphore->queueSize--;
+                             }
+                          }
+
+                      }
+                       tcb[numTasks].state = STATE_SUSPENDED;
+                  }
+                   numTasks++;
+               }
+
+               break;
+        }
+
+        case 8:
+        {
+            pi_mode = R0;
+            break;
+        }
+
+        case 9:
+        {
+            preempt_mode = R0;
+            break;
+        }
+
+        case 10:
+        {
+            sched_mode = R0;
+            break;
+
+        }
+
+        case 11:
+        {
+            while(numTasks < taskCount)
+            {
+                if(compare(tcb[numTasks].name,pid_name))
+                {
+
+                    uint16_t val = tcb[numTasks].pid;
+                    uint32_tToHex1(val);
+                    putsUart0("\r\n");
+                }
+                numTasks++;
+            }
+
+            break;
+        }
+
+        case 12:
+        {
+            while(numTasks < taskCount)
+            {
+                if(compare(tcb[numTasks].name,pid_name))
+                {
+                    if(tcb[numTasks].state != STATE_READY)
+                    {
+                        if(tcb[numTasks].semaphore !=0 )
+                        {
+                            temp_semaphore = tcb[numTasks].semaphore;
+                            if(temp_semaphore->queueSize > 0)
+                            {
+                                temp_semaphore->processQueue[(temp_semaphore->queueSize)-1] = numTasks;
+                            }
+                            else
+                            {
+                                temp_semaphore->processQueue[0]=numTasks;
+                            }
+
+                            temp_semaphore->queueSize++;
+                            tcb[numTasks].state = STATE_BLOCKED;
+                        }
+                        else
+                            tcb[numTasks].state = STATE_READY;
+                    }
+                }
+                numTasks++;
+            }
+
+            break;
+        }
+
+        case 13:
+        {
+            NVIC_APINT_R = NVIC_APINT_VECTKEY | NVIC_APINT_SYSRESETREQ|NVIC_APINT_VECT_RESET;
+            break;
+        }
+
+
+        case 14:
+        {
+            mpu_mode = R0;
+            break;
+        }
+
+        case 15:
+        {
+            while(numTasks < taskCount)
+            {
+                if(tcb[numTasks].pid == R0)
+                {
+ //                tcb[numTasks].state = STATE_READY;
+ //                break;
+                    if(tcb[numTasks].semaphore !=0 )
+                    {
+                        temp_semaphore = tcb[numTasks].semaphore;
+                        if(temp_semaphore->queueSize > 0)
+                        {
+                            temp_semaphore->processQueue[(temp_semaphore->queueSize)-1] = numTasks;
+                        }
+                        else
+                        {
+                            temp_semaphore->processQueue[0]=numTasks;
+                        }
+
+                        temp_semaphore->queueSize++;
+                        tcb[numTasks].state = STATE_BLOCKED;
+                    }
+                    else
+                        tcb[numTasks].state = STATE_READY;
+                    break;
+                }
+                numTasks++;
+            }
+            break;
+        }
+
+        case 16:
+        {
+            while(numTasks < taskCount)
+            {
+                if(tcb[numTasks].pid == R0)
+                {
+                    temp_semaphore = tcb[numTasks].semaphore;
+                    int8_t queue_size = temp_semaphore->queueSize;
+                    uint8_t queue_var = 0;
+                    if(tcb[numTasks].state == STATE_BLOCKED)
+                    {
+                        temp_semaphore->queueSize = 0;
+ //                   for(queue_var = 0; queue_var < queue_size ; queue_var++)
+ //                   {
+ //                      if(temp_semaphore->processQueue[queue_var] == numTasks)
+ //                      {
+ //                          temp_semaphore->processQueue[queue_var] = 0;
+ //                          temp_semaphore->queueSize--;
+ //                      }
+ //                      temp_semaphore->processQueue[queue_var] = temp_semaphore->processQueue[queue_var+1];
+ //                   }
+
+                    }
+                    else if(tcb[numTasks].state == STATE_READY || tcb[numTasks].state == STATE_DELAYED)
+                    {
+                        if(tcb[numTasks].semaphore != 0)
+                        {
+                            tcb[numTasks].semaphore = 0;
+                            tcb[numTasks].currentPriority = tcb[numTasks].priority;
+                            temp_semaphore->count++;
+                            if(queue_size>0)
+                            {
+                                tcb[temp_semaphore->processQueue[0]].state = STATE_READY;
+                                temp_semaphore->count--;
+                                tcb[temp_semaphore->processQueue[0]].semaphore = temp_semaphore;
+                                for(queue_var = 0; queue_var < queue_size ; queue_var++)
+                                {
+                                    temp_semaphore->processQueue[queue_var] = temp_semaphore->processQueue[queue_var+1];
+                                }
+                                temp_semaphore->queueSize--;
+                            }
+                        }
+
+                    }
+                    tcb[numTasks].state = STATE_INVALID;
+                    break;
+                }
+                numTasks++;
+            }
+            break;
+        }
+
+        case 17:
+        {
+            while(numTasks < taskCount)
+            {
+                if(tcb[numTasks].pid == R0)
+                {
+                    tcb[numTasks].currentPriority=R1;
+                    tcb[numTasks].priority=R1;
+                    break;
+                }
+                numTasks++;
+            }
+            break;
+        }
     }
 }
 
 // REQUIRED: code this function
-void mpuFaultIsr()
-{
+void mpuFaultIsr(){
+    putsUart0("MPU fault in process ");
+    putsUart0(tcb[taskCurrent].name);
+    putsUart0("\r\n");
+
+    uint32_t *R0, *R1, *R2, *R3, *R12, *LR, *PC, *xPSR;
+
+    uint32_t *PSP = (uint32_t*) getPSP();
+    putsUart0("PSP = ");
+    uint32_tToHex(PSP);
+    putsUart0("\r\n");
+
+    uint32_t *MSP = (uint32_t*) getMSP();
+    putsUart0("MSP = ");
+    uint32_tToHex(MSP);
+    putsUart0("\r\n");
+
+    putsUart0("MFAULTFLAG = ");
+    uint32_tToHex(NVIC_FAULT_STAT_R & 0xFF);
+    putsUart0("\r\n");
+
+    putsUart0("Offending instruction at ");
+    PC = *(PSP+6);
+    uint32_tToHex(PC);
+    putsUart0(" tried to access ");
+    uint32_tToHex(NVIC_MM_ADDR_R);
+    putsUart0("\r\n");
+
+    putsUart0("Process stack dump:\r\n");
+    R0=*PSP;
+    putsUart0("R0 = ");
+    uint32_tToHex(R0);
+    putsUart0("\r\n");
+
+    R1 = *(PSP+1);
+    putsUart0("R1 = ");
+    uint32_tToHex(R1);
+    putsUart0("\r\n");
+
+    R2 = *(PSP+2);
+    putsUart0("R2 = ");
+    uint32_tToHex(R2);
+    putsUart0("\r\n");
+
+    R3 = *(PSP+3);
+    putsUart0("R3 = ");
+    uint32_tToHex(R3);
+    putsUart0("\r\n");
+
+    R12 = *(PSP+4);
+    putsUart0("R12 = ");
+    uint32_tToHex(R12);
+    putsUart0("\r\n");
+
+    LR = *(PSP+5);
+    putsUart0("LR = ");
+    uint32_tToHex(LR);
+    putsUart0("\r\n");
+
+    PC = *(PSP+6);
+    putsUart0("PC = ");
+    uint32_tToHex(PC);
+    putsUart0("\r\n");
+
+    xPSR = *(PSP+7);
+    putsUart0("xPSR = ");
+    uint32_tToHex(xPSR);
+    putsUart0("\r\n");
+
+    NVIC_SYS_HND_CTRL_R &= ~NVIC_SYS_HND_CTRL_MEMP; //Clear the pending bit
+
+
+    NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV ; //turning on the pendSV exception
+
 }
+
 
 // REQUIRED: code this function
-void hardFaultIsr()
-{
-}
+void hardFaultIsr(){
+    putsUart0("Hard fault in process ");
+    putsUart0(tcb[taskCurrent].name);
+    putsUart0("\r\n");
 
+    uint32_t *PSP = (uint32_t*) getPSP();
+    putsUart0("PSP = ");
+    uint32_tToHex(PSP);
+    putsUart0("\r\n");
+
+    uint32_t *MSP = (uint32_t*) getMSP();
+    putsUart0("MSP = ");
+    uint32_tToHex(MSP);
+    putsUart0("\r\n");
+
+    uint32_t hflag = NVIC_HFAULT_STAT_R;
+    putsUart0("HFLAG = ");
+    uint32_tToHex(hflag);
+    putsUart0("\r\n");
+}
 // REQUIRED: code this function
 void busFaultIsr()
 {
+    putsUart0("Bus fault in process ");
+    putsUart0(tcb[taskCurrent].name);
+    putsUart0("\r\n");
 }
 
 // REQUIRED: code this function
 void usageFaultIsr()
 {
+    putsUart0("Usage fault in process ");
+    putsUart0(tcb[taskCurrent].name);
+    putsUart0("\r\n");
 }
 
 //-----------------------------------------------------------------------------
@@ -929,10 +1386,12 @@ uint8_t readPbs()
 //-----------------------------------------------------------------------------
 void copy(char s1[], char s2[]){
     uint8_t i=0;
-    for (i = 0; s1[i] != '\0'; ++i) {
+    for (i = 0; s1[i] != '\0'; ++i)
+    {
             s2[i] = s1[i];
-        }
+    }
     s2[i] = '\0';
+
 }
 
 uint16_t getLength(char str[])
@@ -955,7 +1414,7 @@ uint8_t getSVCNumber()
 }
 
 //this function converts uint32_t value into hexadecimal value and prints the result.
-void uint32_tToHex(uint32_t decimal){
+void uint32_tToHex1(uint32_t decimal){
     uint32_t quotient, remainder;
     int i,j = 0;
     char hex[100];
@@ -983,6 +1442,38 @@ void uint32_tToHex(uint32_t decimal){
 //    }
 
     for (i = j-1; i >= 0; i--)
+           putcUart0(hex[i]);
+}
+
+//this function converts uint32_t value into hexadecimal value and prints the result.
+void uint32_tToHex(uint32_t decimal){
+    uint32_t quotient, remainder;
+    int i,j = 0;
+    char hex[100];
+
+    quotient = decimal;
+
+    while (quotient != 0)
+    {
+       remainder = quotient % 16;
+       if (remainder < 10){
+           hex[j++] = 48 + remainder;
+       }
+
+       else{
+           hex[j++] = 55 + remainder;
+       }
+
+          quotient = quotient / 16;
+     }
+
+    if(quotient == 0 && j != 8){
+        while(j!=8){
+            hex[j++] = 48;
+        }
+    }
+
+    for (i = j; i >= 0; i--)
            putcUart0(hex[i]);
 }
 
@@ -1029,20 +1520,30 @@ int StringToInteger(char* str)
 }
 
 uint32_t hex2int(char hex[]) {
-    uint32_t val = 0;
+    uint32_t total = 0;
     int i =0;
-    while (hex[i] != 0) {
-        // get current character then increment
-        uint8_t byte = hex[i];
-        // transform hex character to the 4bit equivalent number, using the ascii table indexes
-        if (byte >= '0' && byte <= '9') byte = byte - '0';
-        else if (byte >= 'a' && byte <='f') byte = byte - 'a' + 10;
-        else if (byte >= 'A' && byte <='F') byte = byte - 'A' + 10;
-        // shift 4 to make space for new digit, and add the 4 bits of the new digit
-        val = (val << 4) | (byte & 0xF);
+    int len = 0;
+    int len1 = 0;
+    while (hex[i] != 0)
+    {
+        len++;
         i++;
     }
-    return val;
+    i = 0;
+    while (hex[i] != 0) {
+        uint32_t var = hex[i];
+        if (var >= '0' && var <= '9') var = (var - '0');
+        else if (var >= 'a' && var <='f') var = var - 'a' + 10;
+        else if (var >= 'A' && var <='F') var = var - 'A' + 10;
+        for(len1 = 0; len1<(len-1); len1++)
+        {
+            var = var * 16;
+        }
+        len--;
+        total += var;
+        i++;
+    }
+    return total;
 }
 
 //This function receives characters from the user interface
@@ -1258,52 +1759,52 @@ bool isCommand(USER_DATA* data, const char strCommand[], uint8_t minArguments)
   return false;
 }
 
-void ps()
+void ps(shell_data* shelldata)
 {
-    __asm(" SVC #5");
+    __asm("  SVC #5");
 }
 
-void ipcs()
+void ipcs(shell_data* shelldata)
 {
-    __asm(" SVC #6");
+    __asm("   SVC #6");
 }
 
 void kill(uint32_t val){
-    __asm(" SVC #7");
+    __asm("  SVC #7");
 }
 
 void pi(int8_t val){
-    __asm(" SVC #8");
+    __asm("  SVC #8");
 }
 
 void preempt(int8_t val)
 {
-    __asm(" SVC #9");
+    __asm("  SVC #9");
 }
 
 void sched(int8_t val)
 {
-    __asm(" SVC #10");
+    __asm("  SVC #10");
 }
 
 void pidof(char name[])
 {
-    __asm(" SVC #11");
+    __asm("  SVC #11");
 }
 
 void proc_name(char name[])
 {
-    __asm(" SVC #12");
+    __asm("  SVC #12");
 }
 
 void reboot()
 {
-    __asm(" SVC #13");
+    __asm("  SVC #13");
 }
 
 void mpu(int8_t val)
 {
-    __asm(" SVC #14");
+    __asm("  SVC #14");
 }
 // ------------------------------------------------------------------------------
 //  Task functions
@@ -1321,29 +1822,6 @@ void idle()
         yield();
     }
 }
-
-//void idle2()
-//{
-//    while(true)
-//    {
-//        //code and discard
-//        //char str[100];
-//        //sprintf(str,"%p\r\n", tcb[taskCurrent].sp);
-//        //putsUart0(str);
-//        //Debugging code
-////        __asm("  MOV R0, #0");
-////        __asm("  MOV R1, #1");
-////        __asm("  MOV R2, #2");
-////        __asm("  MOV R3, #3");
-////        __asm("  MOV R12,#12");
-////        __asm("  MOV R4,#4");
-////        __asm("  MOV R5,#5");
-//        YELLOW_LED = 1;
-//        waitMicrosecond(1000);
-//        YELLOW_LED = 0;
-//        yield();
-//    }
-//}
 
 void flash4Hz()
 {
@@ -1490,6 +1968,9 @@ void shell()
 
     USER_DATA data;
 
+    shell_data shelldata;
+
+
     while (true)
     {
         getsUart0(&data);
@@ -1510,13 +1991,171 @@ void shell()
 
         if(isCommand(&data, "ps", 0))
         {
-            ps();
+            ps(&shelldata);
+            putsUart0("Name\t\t PID\t\t%CPU\t\tPriority\t\tState\r\n");
+            uint8_t p = 0;
+            while(p < shelldata.tasks_total)
+            {
+                putsUart0(shelldata.tasks_name[p]);
+
+                shelldata.tempState = getLength(shelldata.tasks_name[p]);
+                if( shelldata.tempState <= 7)
+                {
+                    putsUart0("\t\t");
+                }
+                else
+                {
+                    putsUart0("\t");
+                }
+                while(shelldata.tempState >= 1)
+                {
+                   shelldata.tasks_name[p][shelldata.tempState-1] = 0;
+                   shelldata.tempState--;
+                }
+                uint32_tToHex1(shelldata.pid[p]);
+                putsUart0("\t\t");
+
+                shelldata.tempState = shelldata.cputime[p] / 100;
+                IntegerToString(shelldata.tempState, shelldata.data);
+                putcUart0(shelldata.data[0]);
+                putcUart0(shelldata.data[1]);
+                putcUart0(46);
+                shelldata.tempState = shelldata.cputime[p] % 100;
+                IntegerToString(shelldata.tempState, shelldata.data);
+                putcUart0(shelldata.data[0]);
+                putcUart0(shelldata.data[1]);
+//                shelldata.tempState = getLength(shelldata.cputime[p]);
+//                shelldata.
+//                while(shelldata.semaphores_total != shelldata.tempState)
+//                {
+//                   putcUart0(shelldata.cputime[p][shelldata.semaphores_total]);
+//                   if(shelldata.tempState == 3)
+//                   {
+//                       if(shelldata.semaphores_total == 0)
+//                       {
+//                          putcUart0(46);
+//                       }
+//                   }
+//                   else
+//                   {
+//                       if(shelldata.semaphores_total == 1)
+//                       {
+//                          putcUart0(46);
+//                       }
+//                   }
+//                   shelldata.semaphores_total++;
+//                }
+                putsUart0("\t\t");
+                shelldata.semaphores_total = 0;
+
+                putsUart0(shelldata.priority[p]);
+                putsUart0("\t\t");
+
+                shelldata.tempState = shelldata.state[p];
+                if(shelldata.tempState == 0)
+                {
+                    putsUart0("INVALID");
+                }
+                if(shelldata.tempState == 1)
+                {
+                    putsUart0("UNRUN");
+                }
+                if(shelldata.tempState == 2)
+                {
+                    putsUart0("READY");
+                }
+                if(shelldata.tempState == 3)
+                {
+                    putsUart0("DELAYED FOR ");
+                    putsUart0(shelldata.delay[p]);
+                    putsUart0(" ms");
+                }
+                if(shelldata.tempState == 4)
+                {
+                    putsUart0("BLOCKED BY ");
+                    copy(shelldata.resources[p],shelldata.data);
+                    putsUart0(shelldata.data);
+//                    shelldata.tempState = getLength(shelldata.resources[p]);
+//
+//                    while(shelldata.tempState >= 1)
+//                    {
+//                       shelldata.resources[p][shelldata.tempState-1] = 0;
+//                       shelldata.tempState--;
+//                    }
+                }
+                if(shelldata.tempState == 5)
+                {
+                    putsUart0("SUSPENDED");
+
+                }
+                putsUart0("\t");
+
+               p++;
+               putsUart0("\r\n");
+
+            }
+            shelldata.semaphores_total = 0;
+            putsUart0("Kernel Time:        ");
+            shelldata.tempState = shelldata.kerneltime / 100;
+            IntegerToString(shelldata.tempState, shelldata.data);
+            putcUart0(shelldata.data[0]);
+            putcUart0(shelldata.data[1]);
+            putcUart0(46);
+            shelldata.tempState = shelldata.kerneltime % 100;
+            IntegerToString(shelldata.tempState, shelldata.data);
+            putcUart0(shelldata.data[0]);
+            putcUart0(shelldata.data[1]);
+
+//            shelldata.tempState = getLength(shelldata.kerneltime);
+//            while(shelldata.semaphores_total != shelldata.tempState)
+//            {
+//               putcUart0(shelldata.kerneltime[shelldata.semaphores_total]);
+//               if(shelldata.tempState == 3)
+//               {
+//                   if(shelldata.semaphores_total == 0)
+//                   {
+//                      putcUart0(46);
+//                   }
+//               }
+//               else
+//               {
+//                   if(shelldata.semaphores_total == 1)
+//                   {
+//                      putcUart0(46);
+//                   }
+//               }
+//               shelldata.semaphores_total++;
+//            }
+//            if(shelldata.tempState == 2)
+//            {
+//                putcUart0('0');
+//                putcUart0('0');
+//            }
+            putsUart0("\t\t");
+            shelldata.semaphores_total = 0;
+
             valid = true;
         }
 
         if(isCommand(&data, "ipcs", 0))
         {
-            ipcs();
+            ipcs(&shelldata);
+            putsUart0("Name\t\tCount\tWaiting Threads\r\n");
+            uint8_t i = 0;
+            while(i < shelldata.semaphores_total)
+            {
+                putsUart0(shelldata.semaphores_names[i]);
+                putsUart0("\t");
+
+                putsUart0(shelldata.semaphores_count[i]);
+                putsUart0("\t");
+
+                putsUart0(shelldata.waiting_processes[i]);
+
+                i++;
+                putsUart0("\r\n");
+            }
+            shelldata.semaphores_total = 0;
             valid = true;
         }
 
@@ -1532,10 +2171,12 @@ void shell()
             if(compare(getFieldString(&data,1),"on"))
             {
                 pi(1);
+                putsUart0("priority inheritance is on.\r\n");
             }
             else if(compare(getFieldString(&data,1),"off"))
             {
                 pi(0);
+                putsUart0("priority inheritance is off.\r\n");
             }
 
             valid = true;
@@ -1546,10 +2187,12 @@ void shell()
             if(compare(getFieldString(&data,1),"on"))
             {
                 preempt(1);
+                //putsUart0("preemption is on.\r\n");
             }
             else if(compare(getFieldString(&data,1),"off"))
             {
                 preempt(0);
+                //putsUart0("preemption is off.\r\n");
             }
             valid = true;
         }
@@ -1559,10 +2202,12 @@ void shell()
             if(compare(getFieldString(&data,1),"rr"))
             {
                 sched(1);
+                putsUart0("Round robin scheduler is on.\r\n");
             }
             else if(compare(getFieldString(&data,1),"prio"))
             {
                 sched(0);
+                putsUart0("priority scheduling is on.\r\n");
             }
             valid = true;
         }
@@ -1629,13 +2274,9 @@ int main(void)
 
     // Add required idle process at lowest priority
     ok =  createThread(idle, "Idle", 15, 1024);
-    //Code and discard
-//    ok &=  createThread(idle2, "Idle2", 14, 1024);
-
     // Add other processes
     ok &= createThread(lengthyFn, "LengthyFn", 12, 1024);
     ok &= createThread(flash4Hz, "Flash4Hz", 8, 1024);
-
     ok &= createThread(oneshot, "OneShot", 4, 1024);
     ok &= createThread(readKeys, "ReadKeys", 12, 1024);
     ok &= createThread(debounce, "Debounce", 12, 1024);

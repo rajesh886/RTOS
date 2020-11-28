@@ -58,6 +58,10 @@ extern uint32_t __STACK_TOP;
 extern void pendSvIsr();
 extern void svCallIsr();
 extern void systickIsr();
+extern void hardFaultIsr();
+extern void mpuFaultIsr();
+extern void busFaultIsr();
+extern void usageFaultIsr();
 
 //*****************************************************************************
 //
@@ -73,10 +77,10 @@ void (* const g_pfnVectors[])(void) =
                                             // The initial stack pointer
     ResetISR,                               // The reset handler
     NmiSR,                                  // The NMI handler
-    FaultISR,                               // The hard fault handler
-    IntDefaultHandler,                      // The MPU fault handler
-    IntDefaultHandler,                      // The bus fault handler
-    IntDefaultHandler,                      // The usage fault handler
+    hardFaultIsr,                               // The hard fault handler
+    mpuFaultIsr,                      // The MPU fault handler
+    busFaultIsr,                      // The bus fault handler
+    usageFaultIsr,                      // The usage fault handler
     0,                                      // Reserved
     0,                                      // Reserved
     0,                                      // Reserved
