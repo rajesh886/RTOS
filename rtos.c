@@ -208,8 +208,10 @@ void initRtos()
 // REQUIRED: Implement prioritization to 16 levels
 uint32_t last_searched_task[16];   //stores the last searched task for each priority. If all the tasks are searched for the current priority, then the beginning index for the last searched task
                                     //starts from the index 0 for the current priority
-uint16_t prio = 0;
-uint8_t run_task = 16;
+uint16_t priority_num = 0;        // global variable that keeps track of priority number
+uint8_t run_task = 16;             //global variable that is used to run the task idle. Since idle is at index 0 and priority 15, start the index searching from index 0.
+                                  // When idle runs, run_task variable becomes zero and the priority scheduling for the idle starts from the index 1. Otherwise, the prev_task
+                                  //always becomes zero for the idle and the other tasks never gets chance to run and stays in priority level 15 forever hanging there.
 int rtosScheduler()
 {
     bool ok;
@@ -236,7 +238,7 @@ int rtosScheduler()
         while (!ok)
         {
             //get the last dispatched task for the current priority
-            uint8_t prev_task = last_searched_task[prio];
+            uint8_t prev_task = last_searched_task[priority_num];
             //if the last dispatched task was not zero then begin the task scheduling from the
             //last dispatched task + 1. The last dispatched task was already scheduled
             if((prev_task > 0) || (run_task == 0))
@@ -246,11 +248,13 @@ int rtosScheduler()
             //go through all the tasks for the current priority
             while(prev_task < MAX_TASKS)
             {
-                if((tcb[prev_task].currentPriority == prio && (tcb[prev_task].state == STATE_UNRUN || tcb[prev_task].state == STATE_READY)))
+                if((tcb[prev_task].currentPriority == priority_num && (tcb[prev_task].state == STATE_UNRUN || tcb[prev_task].state == STATE_READY)))
                 {
                     //add the last dispatched task in the array
-                    last_searched_task[prio] = prev_task;
-                    if(prio == 15)
+                    last_searched_task[priority_num] = prev_task;
+                    // if the priority level is 15, reset run_task to zero.
+                    //run_task becomes zero and the task index starts from 1 for the priority number 15.
+                    if(priority_num == 15)
                     {
                         run_task = prev_task;
                     }
@@ -264,14 +268,13 @@ int rtosScheduler()
             //increment the priority level
             if(prev_task == MAX_TASKS)
             {
-               last_searched_task[prio] = 0;
-               prio = prio + 1;
+               last_searched_task[priority_num] = 0;
+               priority_num = priority_num + 1;
             }
-
-            if(prio == 16) prio = 0;
+            // if the priority level reaches to max then reset back to zero
+            if(priority_num == 16) priority_num = 0;
         }
     }
-
 }
 
 bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackBytes)
@@ -296,12 +299,16 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
             while (tcb[i].state != STATE_INVALID) {i++;}
             tcb[i].state = STATE_UNRUN;
             tcb[i].pid = fn;
+            //allocating the stack size for the current task
             tcb[i].spInit = heap + stackBytes;
             tcb[i].sp = heap;
+            //stack size gets incremented for the next task
             heap = heap + stackBytes;
             tcb[i].priority = priority;
             tcb[i].currentPriority = priority;
             copy(name,tcb[i].name);
+            //adding the permission task bit field for the current task
+            //task 0 -> 1, task 1 -> 2, task 2 -> 4, task 3 -> 8, task 4 -> 16, task 5 -> 31, task 6 -> 64, task 7 -> 128, task 8 -> 256, task 9 -> 512, task 10 -> 1024, task 11 -> 2048
             tcb[i].permissionmask = 1<<i;
             // increment task count
             taskCount++;
@@ -352,11 +359,11 @@ void startRtos()
     uint32_t SP = tcb[taskCurrent].spInit;
     setPSP(SP);
 
-    TIMER1_CTL_R |= TIMER_CTL_TAEN;                                 // turn-on timer
+    TIMER1_CTL_R |= TIMER_CTL_TAEN;                                 // turn-on timer before the thread starts to work
 
     tcb[taskCurrent].state = STATE_READY;
     setASP();
-    usermode();
+    usermode();                                                     //turning on the privileged and unprivileged mode.
     _fn fn = tcb[taskCurrent].pid;
     fn();
 
@@ -538,6 +545,10 @@ void post(int8_t semaphore)
 // REQUIRED: in preemptive code, add code to request task switch
 void systickIsr()
 {
+    //systick is called 1000 times in a second.
+    //everytime the systick isr is called, go through all the tasks and
+    //if the task is delayed, decrement the ticks and when it reaches to zero
+    //mark the state of the task as ready
     uint8_t i = 0;
     while(i < MAX_TASKS)
     {
@@ -554,6 +565,12 @@ void systickIsr()
 
     N++;
     uint8_t k = 0;
+    //when N reaches to 1000, reset the initial and final time of the task to zero.
+    //Save the task time of each task to the buffer based on the value of j. If j is zero, it stores in the first index of buffer
+    //if j is 1, it stores in the second index of buffer
+    //reset the variable task time to zero for recording the new values of each task, change the current value of j
+    //to switch the buffer. Also reset the total time after storing the total time in the new temporary value for calculating the
+    //percentage of cpu used by each task later.
     if(N == 1000)
     {
         N = 0;
@@ -570,9 +587,9 @@ void systickIsr()
         total_time = 0;
     }
 
+    //preemption mode
     if (preempt_mode == 1)
     {
-        //tcb[taskCurrent].state = STATE_READY;
         NVIC_INT_CTRL_R = NVIC_INT_CTRL_PEND_SV;
     }
 }
@@ -582,6 +599,8 @@ void systickIsr()
 void pendSvIsr()
 {
     //step 7
+    //H/W cannnot save registers R4-R11 and R13-R15
+    //saving registers R4-R11 and R13-R15 in the PSP
     __asm("     MRS R0, PSP");
     __asm("     STR R4, [R0, #-4]");
     __asm("     SUB R0, R0, #4");
@@ -599,13 +618,16 @@ void pendSvIsr()
     __asm("     SUB R0, R0, #4");
     __asm("     STR R11, [R0, #-4]");
     __asm("     SUB R0, R0, #4");
+
+    //saving the PSP
     tcb[taskCurrent].sp = getPSP();
 
+    //get the final time by reading the timer
     final_time = TIMER1_TAV_R;
-    TIMER1_CTL_R &= ~TIMER_CTL_TAEN;       //turn off timer1
+    TIMER1_CTL_R &= ~TIMER_CTL_TAEN;                    //turn off timer1
     time_difference = final_time - initial_time;
-    total_time += time_difference;
-    tcb[taskCurrent].task_time += time_difference;
+    total_time += time_difference;                      //addding the task time to the total time
+    tcb[taskCurrent].task_time += time_difference;      //everytime the task runs, the task time time is added in the task_time variable
 
     taskCurrent = rtosScheduler();
 
@@ -706,12 +728,16 @@ void pendSvIsr()
      NVIC_MPU_ATTR_R |= (12 << 1);      // Region Size Mask for 8KiB
      NVIC_MPU_ATTR_R |= 0x01;            // Region Enabled
 
+    //resetting the counter value to 0
     TIMER1_TAV_R=0;
-    TIMER1_CTL_R |= TIMER_CTL_TAEN;
+    TIMER1_CTL_R |= TIMER_CTL_TAEN;     //Enable the timer
     initial_time =TIMER1_TAV_R;
 
     if(tcb[taskCurrent].state == STATE_READY){
-        setPSP(tcb[taskCurrent].sp);
+
+        setPSP(tcb[taskCurrent].sp);                //get back the saved PSP
+
+        //get back all the saved registers that were pushed into the PSP
         __asm("     MRS R0, PSP");
         __asm("     LDR R4, [R0, #-4], #-4");
         __asm("     LDR R5, [R0, #-4], #-4");
@@ -723,9 +749,12 @@ void pendSvIsr()
         __asm("     LDR R11, [R0, #-4], #-4");
     }
     else {
+        //If the task was not ready, make the current task state to ready.
         tcb[taskCurrent].state = STATE_READY;
-        setPSP((tcb[taskCurrent].spInit)-32);
-        _fn fn = tcb[taskCurrent].pid;
+
+        setPSP((tcb[taskCurrent].spInit)-32);   //There are 8 registers that gets pushed into the PSP so need to decrement the PSP by 32.
+
+        _fn fn = tcb[taskCurrent].pid;          //get the pointer to the function of the task
 
         uint32_t *PSP = (uint32_t*) getPSP();
 
@@ -735,7 +764,7 @@ void pendSvIsr()
         *(PSP + 3) = 3;
         *(PSP + 4) = 12;
         *(PSP + 5) = 0xFFFFFFFD;
-        *(PSP + 6) = fn;
+        *(PSP + 6) = fn;                          //set the program counter register to the function pointer.
         *(PSP + 7) = 0x61000000;
 
     }
@@ -746,7 +775,9 @@ void pendSvIsr()
 void svCallIsr()
 {
     uint32_t R0, R1, R2, R3, R12, LR, PC, xPSR;
+
     uint32_t *PSP = (uint32_t*) getPSP();
+
     R0 = *PSP;
     R1 = *(PSP+1);
     R2 = *(PSP+2);
@@ -755,33 +786,40 @@ void svCallIsr()
     LR = *(PSP+5);
     PC = *(PSP+6);
     xPSR = *(PSP+7);
+
     uint32_t n = getSVCNumber();
-    uint8_t numTasks = 0;
-    semaphore *temp_semaphore;
-    shell_data *temp_shell;
-    char *pid_name = (char*)R0;
-    temp_shell = R0;
-    uint32_t process_time = 0;
+
+    uint8_t numTasks = 0;           //common variable that is used to run the loop
+
+    semaphore *temp_semaphore;      //pointer to the semaphore
+
+    shell_data *temp_shell;         //pointer to the shell_data struct
+
+    char *pid_name = (char*)R0;     //If the name was passed as an argument in the function, extract the name by making a pointer to the char
+
+    temp_shell = R0;                //for the shell_data, an address of the struct is passsed
+                                    //this will point to the address of the struct is the struct was passed.
+
+    uint32_t process_time = 0;      //record the task time
 
     switch(n)
     {
-        case 0:
+        case 0:  //yield
         {
-            NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV ; //turning on the pendSV exception .... debugging code to verify
+            NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV ; //turning on the pendSV exception
             break;
         }
-        case 1:
+        case 1: //sleep
         {
             tcb[taskCurrent].ticks = R0;
             tcb[taskCurrent].state = STATE_DELAYED;
             NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV ;
             NVIC_ST_RELOAD_R = 39999;
-            //NVIC_ST_CURRENT_R = 0;
             NVIC_ST_CTRL_R |= 0x7; //Enabling clk_src(system clock), inten and enable bit
             break;
         }
 
-        case 2:
+        case 2: //wait
         {
             if(semaphores[R0].count > 0)
             {
@@ -811,12 +849,18 @@ void svCallIsr()
 //                    tcb[semaphores[R0].lastWaitThread].currentPriority = tcb[taskCurrent].priority;
 //                }
 //            }
+                //Priority inheritance mode
                 if(pi_mode == 1)
                 {
                     while(numTasks < taskCount)
                     {
-                        if(tcb[numTasks].semaphore == &semaphores[R0])
+                        //If the task that is in the queue of the semaphore has the higher priority(i.e lower value number) than the task that is
+                        //holding the semaphore and running, then change the priority of the task that is holding the semaphore to the
+                        //higher priority which will be the same as the priority of the task that is being held in the process queue.
+                        if(tcb[numTasks].semaphore == &semaphores[R0])           //checking to see if any task has been holdin the resource
                         {
+                            //if the task that is holding the semaphore has the lower priority, change it back to the
+                            // priority of the task that is the process queue.
                             if(tcb[semaphores[R0].processQueue[0]].priority< tcb[numTasks].priority)
                             {
                                 tcb[numTasks].currentPriority = tcb[semaphores[R0].processQueue[0]].priority;
@@ -827,24 +871,29 @@ void svCallIsr()
                     }
                 }
 
-
+                //allow tasks switches again
                 NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV;
             }
             break;
         }
 
 
-        case 3:
+        case 3: //post
         {
             semaphores[R0].count++;
+            //priority inheritance
+            //when posting back, if the current priority is not same as the priority
+            //in the tcb block change the current priority back to the priority.
             if(tcb[taskCurrent].currentPriority != tcb[taskCurrent].priority)
             {
                 tcb[taskCurrent].currentPriority = tcb[taskCurrent].priority;
             }
+
             if(semaphores[R0].queueSize > 0)
             {
                 tcb[semaphores[R0].processQueue[0]].state = STATE_READY;
                 semaphores[R0].count--;
+                //code and discard
 //            if(taskCurrent == 1 && pi_mode == 0)
 //            {
 //               tcb[1].currentPriority = tcb[1].priority;
@@ -857,95 +906,93 @@ void svCallIsr()
                 semaphores[R0].queueSize--;
 
             }
+
             break;
         }
 
-        case 5:
+        case 5: //ps
         {
+            //pass the total task count to the shell data
             temp_shell->tasks_total = taskCount;
 
             while(numTasks < taskCount)
             {
+                //copy the name of the task to shell data
                 copy(tcb[numTasks].name, temp_shell->tasks_name[numTasks]);
-                temp_shell->tasks_name[numTasks][getLength(temp_shell->tasks_name[numTasks])] = '\0';
-                //copy(temp_shell->data, temp_shell->tasks_name[numTasks]);
 
+                temp_shell->tasks_name[numTasks][getLength(temp_shell->tasks_name[numTasks])] = '\0';
+
+                //pass the pid
                 temp_shell->pid[numTasks] = tcb[numTasks].pid;
 
+                //get the current past task time from the swap buffer
                 uint32_t t = tcb[numTasks].swapBuffer[1-j];
-                //uint32_t process_time = (t*100)/total_time_temp;
+
+                //process_time = (t * 10000)/(40e6)
+                //total N is 40*10^6
                 process_time = (t/4000);
-                //IntegerToString(process_time,temp_shell->data);
-                //copy(temp_shell->data, temp_shell->cputime[numTasks]);
+
+                //pass the cpu percentage
                 temp_shell->cputime[numTasks] = process_time;
+
+                //pass the current priority
                 IntegerToString(tcb[numTasks].currentPriority,temp_shell->data);
                 copy(temp_shell->data, temp_shell->priority[numTasks]);
-//            //putsUart0(temp_shell->data);
-//            //putsUart0("\t\t");
-//
+
+                //pass the state of the task
                 uint8_t tempState = tcb[numTasks].state;
                 temp_shell->state[numTasks] = tempState;
-////            if(tempState == 0)
-////            {
-////                putsUart0("INVALID");
-////            }
-////            if(tempState == 1)
-////            {
-////                putsUart0("UNRUN");
-////            }
-////            if(tempState == 2)
-////            {
-////                putsUart0("READY");
-////            }
+
+                //if the task is delayed, save its ticks
                 if(tempState == 3)
                 {
-                //putsUart0("DELAYED FOR ");
-                    IntegerToString(tcb[numTasks].ticks,temp_shell->data);
-                    copy(temp_shell->data,temp_shell->delay[numTasks]);
-                //putsUart0(temp_shell->data);
-                //putsUart0("ms");
-                }
-                if(tempState == 4)
-                {
-                //putsUart0("BLOCKED BY ");
-                    temp_semaphore = tcb[numTasks].semaphore;
-                //copy(temp_semaphore->name,temp_shell->data);
-                    copy(temp_semaphore->name,temp_shell->resources[numTasks]);
-                    temp_shell->resources[numTasks][10] = '\0';
-                //putsUart0(temp_shell->data);
+
+                   IntegerToString(tcb[numTasks].ticks,temp_shell->data);
+                   copy(temp_shell->data,temp_shell->delay[numTasks]);
 
                 }
-////            if(tempState == 5)
-////            {
-////                putsUart0("SUSPENDED");
-////
-////            }
-////            putsUart0("\t");
-//
+
+                //if the task is blocked, record the semaphore
+                if(tempState == 4)
+                {
+
+                    temp_semaphore = tcb[numTasks].semaphore;
+
+                    copy(temp_semaphore->name,temp_shell->resources[numTasks]);
+                    temp_shell->resources[numTasks][10] = '\0';
+
+
+                }
+
                 numTasks++;
-//            //putsUart0("\r\n");
-//
+
             }
-        //putsUart0("Kernel Time:        ");
+
+            //calculate the kernel time
             uint32_t kernel_time = (40000000 - total_time_temp);
             kernel_time = kernel_time/4000;
-            //IntegerToString(kernel_time,temp_shell->data);
-            //copy(temp_shell->data, temp_shell->kerneltime);
+
+            //pass the kernel time
             temp_shell->kerneltime = kernel_time;
+
             break;
 
         }
 
-        case 6:
+        case 6: //ipcs
         {
+            //record the semaphore count
             temp_shell->semaphores_total = semaphoreCount;
                while(numTasks < semaphoreCount)
                {
+                   //record the semaphores name
                    copy(semaphores[numTasks].name,temp_shell->semaphores_names[numTasks]);
 
+                   //record the count of the semaphore
                    IntegerToString(semaphores[numTasks].count,temp_shell->data);
                    copy(temp_shell->data,temp_shell->semaphores_count[numTasks]);
 
+                   //record the task that is waiting in the queue.
                    int8_t queue_size = semaphores[numTasks].queueSize;
                    uint8_t queue_var = 0;
                    for(queue_var = 0; queue_var < queue_size ; queue_var++)
@@ -957,9 +1004,10 @@ void svCallIsr()
                break;
         }
 
-        case 7:
+        case 7:  //kill pidnumber
         {
-            numTasks = 1;
+            //idle cannot be killed so start the numTasks from 1
+               numTasks = 1;
                if((uint32_t)tcb[0].pid == R0)
                {
                   putsUart0("Cannot kill the Idle process.\r\n");
@@ -968,12 +1016,19 @@ void svCallIsr()
                {
                   if((uint32_t)tcb[numTasks].pid == R0)
                   {
+                      //get the pointer to the semaphore of the task if any
                       temp_semaphore = tcb[numTasks].semaphore;
+
+                      //get the queue size
                       int8_t queue_size = temp_semaphore->queueSize;
                       uint8_t queue_var = 0;
+
+                      //set the queue size in the semaphore to the 0 if the task that is being killed
+                      //is blocked.
                       if(tcb[numTasks].state == STATE_BLOCKED)
                       {
                           temp_semaphore->queueSize = 0;
+                          //code and discard
        //                   for(queue_var = 0; queue_var < queue_size ; queue_var++)
        //                   {
        //                      if(temp_semaphore->processQueue[queue_var] == numTasks)
@@ -985,18 +1040,23 @@ void svCallIsr()
        //                   }
 
                       }
+
+                      //if the task( that is being killed) is either ready or delayed, post the semaphore.
                       else if(tcb[numTasks].state == STATE_READY || tcb[numTasks].state == STATE_DELAYED)
                       {
+                          //if the task has any semaphores
                           if(tcb[numTasks].semaphore != 0)
                           {
-                             //tcb[numTasks].semaphore = 0;
                              tcb[numTasks].currentPriority = tcb[numTasks].priority;
                              temp_semaphore->count++;
                              if(queue_size>0)
                              {
+                                 //make the state of the task that was in the queue to the ready
                                  tcb[temp_semaphore->processQueue[0]].state = STATE_READY;
                                  temp_semaphore->count--;
                                  tcb[temp_semaphore->processQueue[0]].semaphore = temp_semaphore;
+
+                                 //move the task in the semaphore queue.
                                  for(queue_var = 0; queue_var < queue_size ; queue_var++)
                                  {
                                     temp_semaphore->processQueue[queue_var] = temp_semaphore->processQueue[queue_var+1];
@@ -1006,6 +1066,7 @@ void svCallIsr()
                           }
 
                       }
+                      //mark the state of the task to the suspended
                        tcb[numTasks].state = STATE_SUSPENDED;
                   }
                    numTasks++;
@@ -1014,32 +1075,31 @@ void svCallIsr()
                break;
         }
 
-        case 8:
+        case 8: //pi on/off
         {
             pi_mode = R0;
             break;
         }
 
-        case 9:
+        case 9: //preempt on/off
         {
             preempt_mode = R0;
             break;
         }
 
-        case 10:
+        case 10: //sched rr/pio
         {
             sched_mode = R0;
             break;
 
         }
 
-        case 11:
+        case 11: //pidof processname
         {
             while(numTasks < taskCount)
             {
                 if(compare(tcb[numTasks].name,pid_name))
                 {
-
                     uint16_t val = tcb[numTasks].pid;
                     uint32_tToHex1(val);
                     putsUart0("\r\n");
@@ -1050,7 +1110,7 @@ void svCallIsr()
             break;
         }
 
-        case 12:
+        case 12: //run processname
         {
             while(numTasks < taskCount)
             {
@@ -1058,19 +1118,24 @@ void svCallIsr()
                 {
                     if(tcb[numTasks].state != STATE_READY)
                     {
+                        //checking to see of the task has any semaphore
                         if(tcb[numTasks].semaphore !=0 )
                         {
+                            //get the semaphore
                             temp_semaphore = tcb[numTasks].semaphore;
+                            //if the queue size is greater than zero, put the task to the end of the queue.
                             if(temp_semaphore->queueSize > 0)
                             {
                                 temp_semaphore->processQueue[(temp_semaphore->queueSize)-1] = numTasks;
                             }
+                            //add the task to the queue.
                             else
                             {
                                 temp_semaphore->processQueue[0]=numTasks;
                             }
 
                             temp_semaphore->queueSize++;
+                            //mark the state of the task as blocked
                             tcb[numTasks].state = STATE_BLOCKED;
                         }
                         else
@@ -1083,40 +1148,43 @@ void svCallIsr()
             break;
         }
 
-        case 13:
+        case 13: //reboot
         {
             NVIC_APINT_R = NVIC_APINT_VECTKEY | NVIC_APINT_SYSRESETREQ|NVIC_APINT_VECT_RESET;
             break;
         }
 
 
-        case 14:
+        case 14: //mpu on/off
         {
             mpu_mode = R0;
             break;
         }
 
-        case 15:
+        case 15: //restarthread
         {
             while(numTasks < taskCount)
             {
                 if(tcb[numTasks].pid == R0)
                 {
- //                tcb[numTasks].state = STATE_READY;
- //                break;
+                    //checking to see of the task has any semaphore
                     if(tcb[numTasks].semaphore !=0 )
                     {
+                        //get the semaphore
                         temp_semaphore = tcb[numTasks].semaphore;
+                        //if the queue size is greater than zero, put the task to the end of the queue.
                         if(temp_semaphore->queueSize > 0)
                         {
                             temp_semaphore->processQueue[(temp_semaphore->queueSize)-1] = numTasks;
                         }
+                        //add the task to the queue.
                         else
                         {
                             temp_semaphore->processQueue[0]=numTasks;
                         }
 
                         temp_semaphore->queueSize++;
+                        //mark the state of the task as blocked
                         tcb[numTasks].state = STATE_BLOCKED;
                     }
                     else
@@ -1128,8 +1196,10 @@ void svCallIsr()
             break;
         }
 
-        case 16:
+        case 16: //destroy thread
         {
+            //same code as kill
+            //see the description of the kill pidnumber (SVC number is 7)
             while(numTasks < taskCount)
             {
                 if(tcb[numTasks].pid == R0)
@@ -1180,7 +1250,7 @@ void svCallIsr()
             break;
         }
 
-        case 17:
+        case 17: //setthreadPriority
         {
             while(numTasks < taskCount)
             {
@@ -1384,91 +1454,104 @@ uint8_t readPbs()
 // YOUR UNIQUE CODE
 // REQUIRED: add any custom code in this space
 //-----------------------------------------------------------------------------
-void copy(char s1[], char s2[]){
-    uint8_t i=0;
-    for (i = 0; s1[i] != '\0'; ++i)
-    {
-            s2[i] = s1[i];
-    }
-    s2[i] = '\0';
 
-}
-
-uint16_t getLength(char str[])
+//this function copies the char array from the first array to the second string
+void copy(char string1[], char string2[])
 {
     uint8_t i=0;
-    while(str[i] != '\0')
+    //run the loop until the index in the array reached to the null character
+    for (i = 0; string1[i] != '\0'; ++i)
+    {
+       string2[i] = string1[i];
+    }
+    string2[i] = '\0';
+}
+
+//this function gets the length of the string i.e char array
+uint16_t getLength(char string[])
+{
+    uint8_t i=0;
+    while(string[i] != '\0')
     {
         i++;
     }
     return i;
 }
 
+//this function gets the number that was passed in the assembly code to run the svcIsr
 uint8_t getSVCNumber()
 {
     uint32_t *PSP = (uint32_t*) getPSP();
     uint32_t *PC;
-    PC = *(PSP+6) - 2;
 
+    //first get the program counter and decrement the program counter by 2 to reach the assembly line of instruction to grab the number.
+    PC = *(PSP+6) - 2;
     return *PC;
 }
 
 //this function converts uint32_t value into hexadecimal value and prints the result.
-void uint32_tToHex1(uint32_t decimal){
+//this function does not print the zeros of the hexadecimal
+void uint32_tToHex1(uint32_t decimal)
+{
     uint32_t quotient, remainder;
     int i,j = 0;
-    char hex[100];
+    char hex[20];
 
     quotient = decimal;
 
     while (quotient != 0)
     {
        remainder = quotient % 16;
-       if (remainder < 10){
+
+       if (remainder < 10)
+       {
            hex[j++] = 48 + remainder;
        }
 
-       else{
+       else
+       {
            hex[j++] = 55 + remainder;
        }
 
-          quotient = quotient / 16;
+       quotient = quotient / 16;
      }
-
-//    if(quotient == 0 && j != 8){
-//        while(j!=8){
-//            hex[j++] = 48;
-//        }
-//    }
 
     for (i = j-1; i >= 0; i--)
            putcUart0(hex[i]);
 }
 
 //this function converts uint32_t value into hexadecimal value and prints the result.
-void uint32_tToHex(uint32_t decimal){
+//this function prints the zeros of the hexadecimal
+void uint32_tToHex(uint32_t decimal)
+{
     uint32_t quotient, remainder;
     int i,j = 0;
-    char hex[100];
+    char hex[20];
 
     quotient = decimal;
 
     while (quotient != 0)
     {
        remainder = quotient % 16;
-       if (remainder < 10){
+       if (remainder < 10)
+       {
            hex[j++] = 48 + remainder;
        }
 
-       else{
+       else
+       {
            hex[j++] = 55 + remainder;
        }
 
           quotient = quotient / 16;
      }
 
-    if(quotient == 0 && j != 8){
-        while(j!=8){
+    //if the quotient reaches to zero because there are less then 4 hexadecimal numbers,
+    //fill the char array with the zeros.
+    if(quotient == 0 && j != 8)
+    {
+        while(j!=8)
+        {
             hex[j++] = 48;
         }
     }
@@ -1477,72 +1560,89 @@ void uint32_tToHex(uint32_t decimal){
            putcUart0(hex[i]);
 }
 
-void IntegerToString(uint32_t num, char str[])
+//function that converts the integer to string
+void IntegerToString(uint32_t number, char string[])
 {
-    uint32_t i, rem, len = 0, n;
+    uint32_t i, rem, length = 0, n;
 
-    n = num;
+    n = number;
+    //Initially, if n is zero, put the null character in the end of the char array.
     if(n == 0)
     {
-        str[len] = '0';
-        str[len+1] = '\0';
+        string[length] = '0';
+        string[length+1] = '\0';
     }
 
     else
     {
+        //first get the length of the number
         while (n != 0)
         {
-            len++;
+            length++;
             n /= 10;
         }
-        for (i = 0; i < len; i++)
+
+        for (i = 1; i < (length + 1) ; i++)
         {
-            rem = num % 10;
-            num = num / 10;
-            str[len - (i + 1)] = rem + '0';
+            rem = number % 10;
+            number = number / 10;
+            //ascii value of '0' is 48
+            //adding 48 to remainder gives the ascii char
+            //index starts from the last index
+            string[length - i] = rem + '0';
         }
-
-        str[len] = '\0';
-
+        //put the null char in the end of the char array
+        string[length] = '\0';
     }
 }
 
-int StringToInteger(char* str)
-{
-    uint32_t num = 0;
-    int i;
-
-    for (i = 0; str[i] != '\0'; ++i)
-        num = num * 10 + str[i] - '0';
-
-
-    return num;
-}
-
+//function that converts the hexadecimal number to the integer
 uint32_t hex2int(char hex[]) {
+
     uint32_t total = 0;
+
     int i =0;
+
     int len = 0;
+
     int len1 = 0;
+
+    //get the length of the hexadecimal
     while (hex[i] != 0)
     {
         len++;
         i++;
     }
+
     i = 0;
+
     while (hex[i] != 0) {
+
+        //get the first number in the hexadecimal
         uint32_t var = hex[i];
+
+        //comparison with the ascii table
         if (var >= '0' && var <= '9') var = (var - '0');
+
         else if (var >= 'a' && var <='f') var = var - 'a' + 10;
+
         else if (var >= 'A' && var <='F') var = var - 'A' + 10;
+
+        //multiply with the number 16 with len times
         for(len1 = 0; len1<(len-1); len1++)
         {
             var = var * 16;
         }
+
+        //decrement the length
         len--;
+
+        //add the var to the total number
         total += var;
+
         i++;
     }
+
     return total;
 }
 
@@ -1999,6 +2099,7 @@ void shell()
                 putsUart0(shelldata.tasks_name[p]);
 
                 shelldata.tempState = getLength(shelldata.tasks_name[p]);
+                //put the tab based on the length of the string
                 if( shelldata.tempState <= 7)
                 {
                     putsUart0("\t\t");
@@ -2007,11 +2108,14 @@ void shell()
                 {
                     putsUart0("\t");
                 }
+                //clear the array after printing the char array to the screen
                 while(shelldata.tempState >= 1)
                 {
                    shelldata.tasks_name[p][shelldata.tempState-1] = 0;
                    shelldata.tempState--;
                 }
+
+                //printing the pid number
                 uint32_tToHex1(shelldata.pid[p]);
                 putsUart0("\t\t");
 
@@ -2024,27 +2128,7 @@ void shell()
                 IntegerToString(shelldata.tempState, shelldata.data);
                 putcUart0(shelldata.data[0]);
                 putcUart0(shelldata.data[1]);
-//                shelldata.tempState = getLength(shelldata.cputime[p]);
-//                shelldata.
-//                while(shelldata.semaphores_total != shelldata.tempState)
-//                {
-//                   putcUart0(shelldata.cputime[p][shelldata.semaphores_total]);
-//                   if(shelldata.tempState == 3)
-//                   {
-//                       if(shelldata.semaphores_total == 0)
-//                       {
-//                          putcUart0(46);
-//                       }
-//                   }
-//                   else
-//                   {
-//                       if(shelldata.semaphores_total == 1)
-//                       {
-//                          putcUart0(46);
-//                       }
-//                   }
-//                   shelldata.semaphores_total++;
-//                }
+
                 putsUart0("\t\t");
                 shelldata.semaphores_total = 0;
 
@@ -2075,13 +2159,7 @@ void shell()
                     putsUart0("BLOCKED BY ");
                     copy(shelldata.resources[p],shelldata.data);
                     putsUart0(shelldata.data);
-//                    shelldata.tempState = getLength(shelldata.resources[p]);
-//
-//                    while(shelldata.tempState >= 1)
-//                    {
-//                       shelldata.resources[p][shelldata.tempState-1] = 0;
-//                       shelldata.tempState--;
-//                    }
+
                 }
                 if(shelldata.tempState == 5)
                 {
@@ -2106,31 +2184,7 @@ void shell()
             putcUart0(shelldata.data[0]);
             putcUart0(shelldata.data[1]);
 
-//            shelldata.tempState = getLength(shelldata.kerneltime);
-//            while(shelldata.semaphores_total != shelldata.tempState)
-//            {
-//               putcUart0(shelldata.kerneltime[shelldata.semaphores_total]);
-//               if(shelldata.tempState == 3)
-//               {
-//                   if(shelldata.semaphores_total == 0)
-//                   {
-//                      putcUart0(46);
-//                   }
-//               }
-//               else
-//               {
-//                   if(shelldata.semaphores_total == 1)
-//                   {
-//                      putcUart0(46);
-//                   }
-//               }
-//               shelldata.semaphores_total++;
-//            }
-//            if(shelldata.tempState == 2)
-//            {
-//                putcUart0('0');
-//                putcUart0('0');
-//            }
+
             putsUart0("\t\t");
             shelldata.semaphores_total = 0;
 
