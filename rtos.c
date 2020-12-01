@@ -114,9 +114,9 @@ typedef struct _shell_data
     char resources[12][11];           //if any task is blocked, then name of the semaphore that is blocking is stored here.
     uint16_t kerneltime;              //time used by kernel to make multi-threading is stored here.
     uint8_t semaphores_total;         //number of semaphores
-    char semaphores_names[4][12];     //semaphore names are stored here
-    char semaphores_count[4][4];      //count variable of each semaphore is stored here.
-    char waiting_processes[4][12];    //name of the task that is blocked by the semaphore is stored.
+    char semaphores_names[5][12];     //semaphore names are stored here
+    char semaphores_count[5][4];      //count variable of each semaphore is stored here.
+    char waiting_processes[5][12];    //name of the task that is blocked by the semaphore is stored.
     uint8_t tempState;
 }shell_data;
 
@@ -134,9 +134,14 @@ typedef struct _semaphore
 
 semaphore semaphores[MAX_SEMAPHORES];
 
-uint8_t semaphoreCount = 0;
+uint8_t semaphoreCount = 1;
 
-uint8_t keyPressed, keyReleased, flashReq, resource;
+//uint8_t keyPressed, keyReleased, flashReq, resource;
+
+#define keyPressed  1
+#define keyReleased 2
+#define flashReq    3
+#define resource    4
 
 // task
 #define STATE_INVALID      0 // no task
@@ -309,6 +314,7 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
             copy(name,tcb[i].name);
             //adding the permission task bit field for the current task
             //task 0 -> 1, task 1 -> 2, task 2 -> 4, task 3 -> 8, task 4 -> 16, task 5 -> 31, task 6 -> 64, task 7 -> 128, task 8 -> 256, task 9 -> 512, task 10 -> 1024, task 11 -> 2048
+            //uint16_t num = (tcb[i].sp - 0x20000000) / 1024;
             tcb[i].permissionmask = 1<<i;
             // increment task count
             taskCount++;
@@ -339,17 +345,29 @@ void setThreadPriority(_fn fn, uint8_t priority)
     __asm(" SVC #17");
 }
 
-int8_t createSemaphore(uint8_t count, char str[])
+//int8_t createSemaphore(uint8_t count, char str[])
+//{
+//    int8_t index = -1;
+//    if (semaphoreCount < MAX_SEMAPHORES)
+//    {
+//        semaphores[semaphoreCount].count = count;
+//        copy(str,semaphores[semaphoreCount].name);
+//        index = semaphoreCount;
+//        semaphoreCount++;
+//    }
+//    return index;
+//}
+
+bool createSemaphore(uint8_t s, uint8_t count, char str[])
 {
-    int8_t index = -1;
-    if (semaphoreCount < MAX_SEMAPHORES)
+    bool ok = (s<MAX_SEMAPHORES);
+    if(ok)
     {
-        semaphores[semaphoreCount].count = count;
-        copy(str,semaphores[semaphoreCount].name);
-        index = semaphoreCount;
+        semaphores[s].count = count;
+        copy(str,semaphores[s].name);
         semaphoreCount++;
+        return ok;
     }
-    return index;
 }
 
 // REQUIRED: modify this function to start the operating system, using all created tasks
@@ -357,15 +375,16 @@ void startRtos()
 {
     taskCurrent = rtosScheduler();
     uint32_t SP = tcb[taskCurrent].spInit;
-    setPSP(SP);
+    //when fn is called, the stack pointer(PSP) goes up
+    //so need to subtract PSP by 8 byte.
+    setPSP(SP-8);
 
     TIMER1_CTL_R |= TIMER_CTL_TAEN;                                 // turn-on timer before the thread starts to work
 
     tcb[taskCurrent].state = STATE_READY;
     setASP();
-    usermode();                                                     //turning on the privileged and unprivileged mode.
+
     _fn fn = tcb[taskCurrent].pid;
-    fn();
 
     //Initializing MPU Control register. It is disabled at first.
       NVIC_MPU_CTRL_R |= 0x00000000;
@@ -420,14 +439,16 @@ void startRtos()
       NVIC_MPU_ATTR_R |= 0x00040000;      // Shareable
       NVIC_MPU_ATTR_R |= 0x00020000;      // Cacheable
       NVIC_MPU_ATTR_R |= 0x00000000;      // Not Bufferable
-      if(taskCurrent < 8)
+      if(taskCurrent < 4)
       {
-        NVIC_MPU_ATTR_R = tcb[taskCurrent].permissionmask << 8;
+        NVIC_MPU_ATTR_R &= ~0x0000FF00;
+        NVIC_MPU_ATTR_R |= tcb[taskCurrent].permissionmask << 12;
       }
-      else if(taskCurrent >= 8)
+      else if(taskCurrent >= 4)
       {
-        NVIC_MPU_ATTR_R = 0x00000000;
+        NVIC_MPU_ATTR_R &= ~0x0000FF00;
       }
+      NVIC_MPU_ATTR_R |= 0x00000000;
       NVIC_MPU_ATTR_R |= (12 << 1);      // Region Size Mask for 8KiB
       NVIC_MPU_ATTR_R |= 0x01;            // Region Enabled
 
@@ -444,13 +465,16 @@ void startRtos()
       NVIC_MPU_ATTR_R |= 0x00040000;      // Shareable
       NVIC_MPU_ATTR_R |= 0x00020000;      // Cacheable
       NVIC_MPU_ATTR_R |= 0x00000000;      // Not Bufferable
-      if(taskCurrent > 7 && taskCurrent < 16)
+
+      if(taskCurrent > 3 && taskCurrent < 12)
       {
-        NVIC_MPU_ATTR_R = tcb[taskCurrent].permissionmask << 8;
+        NVIC_MPU_ATTR_R &= ~0x0000FF00;
+        //NVIC_MPU_ATTR_R |= 0x00000C00;
+        NVIC_MPU_ATTR_R |= tcb[taskCurrent].permissionmask << 4;
       }
       else
       {
-        NVIC_MPU_ATTR_R = 0x00000000;
+          NVIC_MPU_ATTR_R &= ~0x0000FF00;
       }
       NVIC_MPU_ATTR_R |= (12 << 1);      // Region Size Mask for 8KiB
       NVIC_MPU_ATTR_R |= 0x01;            // Region Enabled
@@ -468,14 +492,16 @@ void startRtos()
       NVIC_MPU_ATTR_R |= 0x00040000;      // Shareable
       NVIC_MPU_ATTR_R |= 0x00020000;      // Cacheable
       NVIC_MPU_ATTR_R |= 0x00000000;      // Not Bufferable
-      if(taskCurrent > 15 && taskCurrent < 24)
+      if(taskCurrent > 11 && taskCurrent < 20)
       {
-        NVIC_MPU_ATTR_R = tcb[taskCurrent].permissionmask << 8;
+          NVIC_MPU_ATTR_R &= ~0x0000FF00;
+          NVIC_MPU_ATTR_R |= tcb[taskCurrent].permissionmask >> 4;
       }
       else
       {
-        NVIC_MPU_ATTR_R = 0x00000000;
+          NVIC_MPU_ATTR_R &= ~0x0000FF00;
       }
+
       NVIC_MPU_ATTR_R |= (12 << 1);      // Region Size Mask for 8KiB
       NVIC_MPU_ATTR_R |= 0x01;            // Region Enabled
 
@@ -492,23 +518,27 @@ void startRtos()
       NVIC_MPU_ATTR_R |= 0x00040000;      // Shareable
       NVIC_MPU_ATTR_R |= 0x00020000;      // Cacheable
       NVIC_MPU_ATTR_R |= 0x00000000;      // Not Bufferable
-      if(taskCurrent > 23 && taskCurrent < 32)
+      if(taskCurrent > 19 && taskCurrent < 28)
       {
-        NVIC_MPU_ATTR_R = tcb[taskCurrent].permissionmask << 8;
+         NVIC_MPU_ATTR_R &= ~0x0000FF00;
+         NVIC_MPU_ATTR_R |= tcb[taskCurrent].permissionmask >> 12;
       }
       else
       {
-        NVIC_MPU_ATTR_R = 0x00000000;
+          NVIC_MPU_ATTR_R &= ~0x0000FF00;
       }
       NVIC_MPU_ATTR_R |= (12 << 1);      // Region Size Mask for 8KiB
       NVIC_MPU_ATTR_R |= 0x01;            // Region Enabled
 
-      //if(myshell.mpu_mode == 1)
+
       NVIC_MPU_CTRL_R |= 0x00000004 | 0x00000002 | 0x00000001;        // MPU Default Region | MPU Enabled During Faults | MPU enable
 
       NVIC_SYS_HND_CTRL_R |= 0x00040000; //Enabling usage fault
       NVIC_SYS_HND_CTRL_R |= 0x00020000; //Enabling bus fault
       NVIC_SYS_HND_CTRL_R |= 0x00010000; //Enabling memory management fault
+
+      usermode();                                                     //turning on the privileged and unprivileged mode.
+      fn();
 }
 
 // REQUIRED: modify this function to yield execution back to scheduler using pendsv
@@ -620,7 +650,7 @@ void pendSvIsr()
     __asm("     SUB R0, R0, #4");
 
     //saving the PSP
-    tcb[taskCurrent].sp = getPSP();
+    tcb[taskCurrent].spInit = getPSP();
 
     //get the final time by reading the timer
     final_time = TIMER1_TAV_R;
@@ -645,14 +675,16 @@ void pendSvIsr()
      NVIC_MPU_ATTR_R |= 0x00040000;      // Shareable
      NVIC_MPU_ATTR_R |= 0x00020000;      // Cacheable
      NVIC_MPU_ATTR_R |= 0x00000000;      // Not Bufferable
-     if(taskCurrent < 8)
+     if(taskCurrent < 4)
      {
-       NVIC_MPU_ATTR_R = tcb[taskCurrent].permissionmask << 8;
+         NVIC_MPU_ATTR_R &= ~0x0000FF00;
+       NVIC_MPU_ATTR_R |= tcb[taskCurrent].permissionmask << 12;
      }
-     else if(taskCurrent >= 8)
+     else if(taskCurrent >= 4)
      {
-       NVIC_MPU_ATTR_R = 0x00000000;
+       NVIC_MPU_ATTR_R &= ~0x0000FF00;
      }
+     //NVIC_MPU_ATTR_R |= 0x00000000;
      NVIC_MPU_ATTR_R |= (12 << 1);      // Region Size Mask for 8KiB
      NVIC_MPU_ATTR_R |= 0x01;            // Region Enabled
 
@@ -669,13 +701,15 @@ void pendSvIsr()
      NVIC_MPU_ATTR_R |= 0x00040000;      // Shareable
      NVIC_MPU_ATTR_R |= 0x00020000;      // Cacheable
      NVIC_MPU_ATTR_R |= 0x00000000;      // Not Bufferable
-     if(taskCurrent > 7 && taskCurrent < 16)
+
+     if(taskCurrent > 3 && taskCurrent < 12)
      {
-       NVIC_MPU_ATTR_R = tcb[taskCurrent].permissionmask << 8;
+         NVIC_MPU_ATTR_R &= ~0x0000FF00;
+       NVIC_MPU_ATTR_R |= tcb[taskCurrent].permissionmask  << 4;
      }
      else
      {
-       NVIC_MPU_ATTR_R = 0x00000000;
+         NVIC_MPU_ATTR_R &= ~0x0000FF00;
      }
      NVIC_MPU_ATTR_R |= (12 << 1);      // Region Size Mask for 8KiB
      NVIC_MPU_ATTR_R |= 0x01;            // Region Enabled
@@ -693,14 +727,16 @@ void pendSvIsr()
      NVIC_MPU_ATTR_R |= 0x00040000;      // Shareable
      NVIC_MPU_ATTR_R |= 0x00020000;      // Cacheable
      NVIC_MPU_ATTR_R |= 0x00000000;      // Not Bufferable
-     if(taskCurrent > 15 && taskCurrent < 24)
+     if(taskCurrent > 11 && taskCurrent < 20)
      {
-       NVIC_MPU_ATTR_R = tcb[taskCurrent].permissionmask << 8;
+         NVIC_MPU_ATTR_R &= ~0x0000FF00;
+         NVIC_MPU_ATTR_R |= tcb[taskCurrent].permissionmask << 8;
      }
      else
      {
-       NVIC_MPU_ATTR_R = 0x00000000;
+         NVIC_MPU_ATTR_R &= ~0x0000FF00;
      }
+
      NVIC_MPU_ATTR_R |= (12 << 1);      // Region Size Mask for 8KiB
      NVIC_MPU_ATTR_R |= 0x01;            // Region Enabled
 
@@ -717,13 +753,14 @@ void pendSvIsr()
      NVIC_MPU_ATTR_R |= 0x00040000;      // Shareable
      NVIC_MPU_ATTR_R |= 0x00020000;      // Cacheable
      NVIC_MPU_ATTR_R |= 0x00000000;      // Not Bufferable
-     if(taskCurrent > 23 && taskCurrent < 32)
+     if(taskCurrent > 19 && taskCurrent < 28)
      {
-       NVIC_MPU_ATTR_R = tcb[taskCurrent].permissionmask << 8;
+         NVIC_MPU_ATTR_R &= ~0x0000FF00;
+        NVIC_MPU_ATTR_R |= tcb[taskCurrent].permissionmask << 8;
      }
      else
      {
-       NVIC_MPU_ATTR_R = 0x00000000;
+         NVIC_MPU_ATTR_R &= ~0x0000FF00;
      }
      NVIC_MPU_ATTR_R |= (12 << 1);      // Region Size Mask for 8KiB
      NVIC_MPU_ATTR_R |= 0x01;            // Region Enabled
@@ -735,7 +772,7 @@ void pendSvIsr()
 
     if(tcb[taskCurrent].state == STATE_READY){
 
-        setPSP(tcb[taskCurrent].sp);                //get back the saved PSP
+        setPSP(tcb[taskCurrent].spInit);                //get back the saved PSP
 
         //get back all the saved registers that were pushed into the PSP
         __asm("     MRS R0, PSP");
@@ -824,10 +861,12 @@ void svCallIsr()
             if(semaphores[R0].count > 0)
             {
                 semaphores[R0].count--;
-                if(R0==3)
-                {
-                    semaphores[R0].lastWaitThread = taskCurrent;
-                }
+                //code and discard
+//                if(R0==3)
+//                {
+//                    semaphores[R0].lastWaitThread = taskCurrent;
+//                }
+                //code and discard
                 //semaphores[R0].lastWaitThread = taskCurrent;   //last task that used semaphore
             }
             else{
@@ -835,6 +874,7 @@ void svCallIsr()
                 tcb[taskCurrent].semaphore = &semaphores[R0];
                 semaphores[R0].processQueue[semaphores[R0].queueSize] = taskCurrent;
                 semaphores[R0].queueSize++;
+                //code and discard
 //            if(pi_mode == 0)
 //            {
 //                if(semaphores[R0].lastWaitThread == 6 && taskCurrent == 6)
@@ -983,6 +1023,7 @@ void svCallIsr()
         {
             //record the semaphore count
             temp_shell->semaphores_total = semaphoreCount;
+            numTasks = numTasks + 1;
                while(numTasks < semaphoreCount)
                {
                    //record the semaphores name
@@ -1273,7 +1314,7 @@ void mpuFaultIsr(){
     putsUart0(tcb[taskCurrent].name);
     putsUart0("\r\n");
 
-    uint32_t *R0, *R1, *R2, *R3, *R12, *LR, *PC, *xPSR;
+    uint32_t R0, R1, R2, R3, R12, LR, PC, xPSR;
 
     uint32_t *PSP = (uint32_t*) getPSP();
     putsUart0("PSP = ");
@@ -1339,6 +1380,7 @@ void mpuFaultIsr(){
 
     NVIC_SYS_HND_CTRL_R &= ~NVIC_SYS_HND_CTRL_MEMP; //Clear the pending bit
 
+    tcb[taskCurrent].state = STATE_INVALID;
 
     NVIC_INT_CTRL_R |= NVIC_INT_CTRL_PEND_SV ; //turning on the pendSV exception
 
@@ -1526,7 +1568,7 @@ void uint32_tToHex(uint32_t decimal)
 {
     uint32_t quotient, remainder;
     int i,j = 0;
-    char hex[20];
+    char hex[9];
 
     quotient = decimal;
 
@@ -2321,10 +2363,15 @@ int main(void)
     waitMicrosecond(250000);
 
     // Initialize semaphores
-    keyPressed = createSemaphore(1, "keyPressed");
-    keyReleased = createSemaphore(0, "keyReleased");
-    flashReq = createSemaphore(5, "flashReq");
-    resource = createSemaphore(1, "resource");
+//    keyPressed = createSemaphore(1, "keyPressed");
+//    keyReleased = createSemaphore(0, "keyReleased");
+//    flashReq = createSemaphore(5, "flashReq");
+//    resource = createSemaphore(1, "resource");
+
+    bool s1 = createSemaphore(keyPressed, 1, "keyPressed");
+    bool s2 = createSemaphore(keyReleased, 0, "keyReleased");
+    bool s3 = createSemaphore(flashReq, 5, "flashReq");
+    bool s4 = createSemaphore(resource, 1, "resource");
 
     // Add required idle process at lowest priority
     ok =  createThread(idle, "Idle", 15, 1024);
